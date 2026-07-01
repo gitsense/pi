@@ -1,3 +1,14 @@
+> [!NOTE]
+> This branch ships with Brains: queryable repository intelligence that helps Pi reason about relevant docs, files, dependencies, and hidden technical debt.
+>
+> To use it, install [`pi-brains`](https://github.com/gitsense/pi-brains), start Pi in this repo, then run:
+>
+> ```text
+> /brains build
+> ```
+>
+> The included Brains cover docs, code intent, TypeScript dependency navigation, and implicit todos. Ask Pi to use the Brains before planning changes, then verify important findings against source.
+
 <p align="center">
   <a href="https://pi.dev">
     <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
