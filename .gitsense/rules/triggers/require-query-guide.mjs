@@ -4,6 +4,24 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const ctx = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 
+const guideByCommand = {
+  query: { guide: "query", label: "query" },
+  rg: { guide: "visualization", label: "visualization" },
+  notes: { guide: "notes", label: "notes" },
+  rules: { guide: "rules", label: "rules" },
+};
+
+const command = ctx.toolCall?.command ?? "";
+const match = command.match(/^gsc\s+(query|rg|notes|rules)(\s|$)/);
+const commandGroup = match?.[1];
+const requiredGuide = guideByCommand[commandGroup];
+const applies = ctx.toolCall?.action === "bash" && Boolean(requiredGuide);
+
+if (!applies) {
+  console.log(JSON.stringify({ matched: false, block: false }));
+  process.exit(0);
+}
+
 const canReadHistory =
   ctx.agent?.id === "pi" &&
   ctx.agent?.session?.historyAvailable &&
@@ -34,7 +52,7 @@ try {
   guideLoaded = history.toolCalls?.some(
     (tc) =>
       tc.toolName === "bash" &&
-      tc.arguments?.command?.includes("gsc experts guide query")
+      tc.arguments?.command?.includes(`gsc experts guide ${requiredGuide.guide}`)
   );
 } catch {
   // Error reading history — allow the call (fail open)
@@ -42,16 +60,13 @@ try {
   process.exit(0);
 }
 
-const isQueryCommand = ctx.toolCall?.action === "bash" && ctx.toolCall?.command?.startsWith("gsc query");
-
-if (isQueryCommand && !guideLoaded) {
+if (!guideLoaded) {
   console.log(
     JSON.stringify({
       matched: true,
       block: true,
-      message:
-        "Before using `gsc query`, you must first load the query guide: `gsc experts guide query`",
-      notice: "Blocked: query guide not loaded in this session.",
+      message: `Before using \`gsc ${commandGroup}\`, you must first load the ${requiredGuide.label} guide: \`gsc experts guide ${requiredGuide.guide}\``,
+      notice: `Blocked: ${requiredGuide.label} guide not loaded in this session.`,
     })
   );
 } else {
