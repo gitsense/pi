@@ -1,10 +1,10 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-06-30T14:42:16.724Z",
+  "generated_at": "2026-07-03T15:01:38.259Z",
   "manifest": {
-    "name": "Pi Agent Documentation Index",
+    "name": "Pi - Documentation Index",
     "database_name": "docs",
-    "description": "Topic index of 33 markdown and JSON documentation files across the Pi agent monorepo (ai, agent-core, coding-agent, tui packages). Tracks doc_type, status, audience, and key topics to enable AI agents to answer \"which doc should I read?\" for contributors, users, and operators.",
+    "description": "Topic index of documentation files across the Pi agent monorepo (ai, agent-core, coding-agent, tui packages). Tracks doc_type, status, audience, and key topics to enable AI agents to answer \"which doc should I read?\" for contributors, users, and operators.",
     "tags": [
       "documentation",
       "coding-agent",
@@ -162,7 +162,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/compaction.md",
       "language": "markdown",
-      "chat_id": 111223,
+      "chat_id": 112421,
       "fields": {
         "F0": "packages/coding-agent/docs/compaction.md",
         "F1": "compaction.md",
@@ -232,7 +232,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/containerization.md",
       "language": "markdown",
-      "chat_id": 111224,
+      "chat_id": 112422,
       "fields": {
         "F0": "packages/coding-agent/docs/containerization.md",
         "F1": "containerization.md",
@@ -284,7 +284,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/custom-provider.md",
       "language": "markdown",
-      "chat_id": 111225,
+      "chat_id": 112423,
       "fields": {
         "F0": "packages/coding-agent/docs/custom-provider.md",
         "F1": "custom-provider.md",
@@ -366,7 +366,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/development.md",
       "language": "markdown",
-      "chat_id": 111226,
+      "chat_id": 112424,
       "fields": {
         "F0": "packages/coding-agent/docs/development.md",
         "F1": "development.md",
@@ -418,7 +418,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/docs.json",
       "language": "json",
-      "chat_id": 111227,
+      "chat_id": 112425,
       "fields": {
         "F0": "packages/coding-agent/docs/docs.json",
         "F1": "docs.json",
@@ -454,7 +454,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/extensions.md",
       "language": "markdown",
-      "chat_id": 111228,
+      "chat_id": 112426,
       "fields": {
         "F0": "packages/coding-agent/docs/extensions.md",
         "F1": "extensions.md",
@@ -582,7 +582,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/index.md",
       "language": "markdown",
-      "chat_id": 111229,
+      "chat_id": 112427,
       "fields": {
         "F0": "packages/coding-agent/docs/index.md",
         "F1": "index.md",
@@ -657,7 +657,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/json.md",
       "language": "markdown",
-      "chat_id": 111230,
+      "chat_id": 112428,
       "fields": {
         "F0": "packages/coding-agent/docs/json.md",
         "F1": "json.md",
@@ -712,7 +712,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/keybindings.md",
       "language": "markdown",
-      "chat_id": 111231,
+      "chat_id": 112429,
       "fields": {
         "F0": "packages/coding-agent/docs/keybindings.md",
         "F1": "keybindings.md",
@@ -778,7 +778,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/models.md",
       "language": "markdown",
-      "chat_id": 111232,
+      "chat_id": 112430,
       "fields": {
         "F0": "packages/coding-agent/docs/models.md",
         "F1": "models.md",
@@ -846,7 +846,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/packages.md",
       "language": "markdown",
-      "chat_id": 111233,
+      "chat_id": 112431,
       "fields": {
         "F0": "packages/coding-agent/docs/packages.md",
         "F1": "packages.md",
@@ -907,7 +907,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/prompt-templates.md",
       "language": "markdown",
-      "chat_id": 111234,
+      "chat_id": 112432,
       "fields": {
         "F0": "packages/coding-agent/docs/prompt-templates.md",
         "F1": "prompt-templates.md",
@@ -952,7 +952,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/providers.md",
       "language": "markdown",
-      "chat_id": 111235,
+      "chat_id": 112433,
       "fields": {
         "F0": "packages/coding-agent/docs/providers.md",
         "F1": "providers.md",
@@ -1007,7 +1007,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/quickstart.md",
       "language": "markdown",
-      "chat_id": 111236,
+      "chat_id": 112434,
       "fields": {
         "F0": "packages/coding-agent/docs/quickstart.md",
         "F1": "quickstart.md",
@@ -1074,7 +1074,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/rpc.md",
       "language": "markdown",
-      "chat_id": 111237,
+      "chat_id": 112435,
       "fields": {
         "F0": "packages/coding-agent/docs/rpc.md",
         "F1": "rpc.md",
@@ -1199,7 +1199,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/sdk.md",
       "language": "markdown",
-      "chat_id": 111238,
+      "chat_id": 112436,
       "fields": {
         "F0": "packages/coding-agent/docs/sdk.md",
         "F1": "sdk.md",
@@ -1313,7 +1313,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/security.md",
       "language": "markdown",
-      "chat_id": 111239,
+      "chat_id": 112437,
       "fields": {
         "F0": "packages/coding-agent/docs/security.md",
         "F1": "security.md",
@@ -1362,7 +1362,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/session-format.md",
       "language": "markdown",
-      "chat_id": 111240,
+      "chat_id": 112438,
       "fields": {
         "F0": "packages/coding-agent/docs/session-format.md",
         "F1": "session-format.md",
@@ -1449,7 +1449,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/sessions.md",
       "language": "markdown",
-      "chat_id": 111241,
+      "chat_id": 112439,
       "fields": {
         "F0": "packages/coding-agent/docs/sessions.md",
         "F1": "sessions.md",
@@ -1518,7 +1518,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/settings.md",
       "language": "markdown",
-      "chat_id": 111242,
+      "chat_id": 112440,
       "fields": {
         "F0": "packages/coding-agent/docs/settings.md",
         "F1": "settings.md",
@@ -1594,7 +1594,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/shell-aliases.md",
       "language": "markdown",
-      "chat_id": 111243,
+      "chat_id": 112441,
       "fields": {
         "F0": "packages/coding-agent/docs/shell-aliases.md",
         "F1": "shell-aliases.md",
@@ -1624,7 +1624,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/skills.md",
       "language": "markdown",
-      "chat_id": 111244,
+      "chat_id": 112442,
       "fields": {
         "F0": "packages/coding-agent/docs/skills.md",
         "F1": "skills.md",
@@ -1689,7 +1689,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/terminal-setup.md",
       "language": "markdown",
-      "chat_id": 111245,
+      "chat_id": 112443,
       "fields": {
         "F0": "packages/coding-agent/docs/terminal-setup.md",
         "F1": "terminal-setup.md",
@@ -1754,7 +1754,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/termux.md",
       "language": "markdown",
-      "chat_id": 111246,
+      "chat_id": 112444,
       "fields": {
         "F0": "packages/coding-agent/docs/termux.md",
         "F1": "termux.md",
@@ -1812,7 +1812,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/themes.md",
       "language": "markdown",
-      "chat_id": 111247,
+      "chat_id": 112445,
       "fields": {
         "F0": "packages/coding-agent/docs/themes.md",
         "F1": "themes.md",
@@ -1877,7 +1877,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/tmux.md",
       "language": "markdown",
-      "chat_id": 111248,
+      "chat_id": 112446,
       "fields": {
         "F0": "packages/coding-agent/docs/tmux.md",
         "F1": "tmux.md",
@@ -1922,7 +1922,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/tui.md",
       "language": "markdown",
-      "chat_id": 111249,
+      "chat_id": 112447,
       "fields": {
         "F0": "packages/coding-agent/docs/tui.md",
         "F1": "tui.md",
@@ -2011,7 +2011,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/usage.md",
       "language": "markdown",
-      "chat_id": 111250,
+      "chat_id": 112448,
       "fields": {
         "F0": "packages/coding-agent/docs/usage.md",
         "F1": "usage.md",
@@ -2102,7 +2102,7 @@
       "branch_ref": "B0",
       "file_path": "packages/coding-agent/docs/windows.md",
       "language": "markdown",
-      "chat_id": 111251,
+      "chat_id": 112449,
       "fields": {
         "F0": "packages/coding-agent/docs/windows.md",
         "F1": "windows.md",
@@ -2139,7 +2139,7 @@
       "branch_ref": "B0",
       "file_path": "packages/agent/docs/agent-harness.md",
       "language": "markdown",
-      "chat_id": 111475,
+      "chat_id": 112780,
       "fields": {
         "F0": "packages/agent/docs/agent-harness.md",
         "F1": "agent-harness.md",
@@ -2223,7 +2223,7 @@
       "branch_ref": "B0",
       "file_path": "packages/agent/docs/durable-harness.md",
       "language": "markdown",
-      "chat_id": 111476,
+      "chat_id": 112781,
       "fields": {
         "F0": "packages/agent/docs/durable-harness.md",
         "F1": "durable-harness.md",
@@ -2282,7 +2282,7 @@
       "branch_ref": "B0",
       "file_path": "packages/agent/docs/hooks.md",
       "language": "markdown",
-      "chat_id": 111477,
+      "chat_id": 112782,
       "fields": {
         "F0": "packages/agent/docs/hooks.md",
         "F1": "hooks.md",
@@ -2351,9 +2351,106 @@
     {
       "repo_ref": "R0",
       "branch_ref": "B0",
+      "file_path": "packages/agent/docs/models.md",
+      "language": "markdown",
+      "chat_id": 112783,
+      "fields": {
+        "F0": "packages/agent/docs/models.md",
+        "F1": "models.md",
+        "F2": 112783,
+        "F3": "Models architecture",
+        "F4": "Describes the target design for the pi-ai model/provider refactor: a dumb Models runtime, concrete Provider factories, lazy API implementations, a fixed auth resolution tree with injectable CredentialStore, and a compat entrypoint for old global APIs. Covers package layout, public API, streaming path, auth/credential architecture, models.json composition, AgentHarness integration, and phased implementation TODOs.",
+        "F5": "design_spec",
+        "F6": "mixed",
+        "F7": "maintainer",
+        "F8": [
+          "models-runtime",
+          "provider-collection",
+          "credential-store",
+          "auth-resolution",
+          "oauth-auth",
+          "api-key-auth",
+          "lazy-api",
+          "provider-factory",
+          "models-compat",
+          "agent-harness-integration",
+          "model-api-typing",
+          "models-json-overrides",
+          "provider-model-listing",
+          "shared-api-implementations",
+          "tree-shaking",
+          "runtime-override-overlay"
+        ],
+        "F9": [
+          "package-layout",
+          "public-usage",
+          "core-runtime-models",
+          "provider",
+          "provider-model-listing",
+          "streaming-path",
+          "api-implementations-under-srcapi",
+          "shared-api-implementations-across-concrete-providers",
+          "auth",
+          "credentials",
+          "credential-store",
+          "resolution-policy-fixed",
+          "replacing-authstorage",
+          "login-callbacks",
+          "oauth-attachment",
+          "provider-wrappers-and-modelsjson",
+          "custom-providers-createprovider",
+          "compat-entrypoint",
+          "builtin-static-helpers",
+          "tree-shaking-and-lazy-imports",
+          "agentharness-integration",
+          "coding-agent-next-phase-not-this-pass",
+          "implementation-todos",
+          "error-behavior"
+        ],
+        "F10": [],
+        "F11": "[\"Models is a dumb runtime collection, not a registry with complex dispatch\",\"Auth resolution policy is a fixed decision tree, not a strategy object\",\"Dynamic model lists use sync reads plus explicit async refresh\",\"API implementations live under src/api/ and are reusable/lazy\",\"models.json is a provider wrapper layer that composes, not mutates\",\"OAuth attachment is always present on providers, lazy-loaded with no factory toggle\",\"Credential store uses serialized modify() pattern with no raw set()\",\"Compat entrypoint preserves old global API surface temporarily for migration\"]",
+        "F12": "[\"Generated catalog split per provider may be deferred if the generator change is too large\",\"Web OAuth implementations are deferred as follow-ups\",\"coding-agent ModelRegistry-to-Models migration is in progress (Phase 9) and AgentSession adoption of AgentHarness is gated on pi 2.0\"]",
+        "F13": [
+          "Models",
+          "MutableModels",
+          "Provider<TApi>",
+          "Model<TApi>",
+          "CredentialStore",
+          "FileCredentialStore",
+          "ApiKeyAuth",
+          "OAuthAuth",
+          "AuthResult",
+          "AuthContext",
+          "ApiOptionsMap",
+          "ApiStreamOptions",
+          "hasApi()",
+          "createProvider()",
+          "createModels()",
+          "AgentHarness",
+          "ModelsError",
+          "lazyApi",
+          "lazyStream",
+          "lazyOAuth",
+          "AuthLoginCallbacks"
+        ],
+        "F14": [
+          "create-models-collection",
+          "register-provider",
+          "resolve-model-auth",
+          "refresh-provider-models",
+          "stream-model-response",
+          "adapt-oauth-extension",
+          "wrap-models-json-provider",
+          "replace-authstorage"
+        ]
+      }
+    },
+    {
+      "repo_ref": "R0",
+      "branch_ref": "B0",
       "file_path": "packages/agent/docs/observability.md",
       "language": "markdown",
-      "chat_id": 111478,
+      "chat_id": 112784,
       "fields": {
         "F0": "packages/agent/docs/observability.md",
         "F1": "observability.md",
