@@ -1,1 +1,2 @@
 {"slug":"tool-gates","description":"Rules that enforce prerequisites before allowing tool or command execution","created_at":"2026-07-02T02:28:08.05251Z","updated_at":"2026-07-02T02:28:08.05251Z"}
+{"slug":"pi-compaction","description":"How Pi handles compaction and branch summarization for context management","created_at":"2026-07-10T12:48:42.989006Z","updated_at":"2026-07-10T12:48:42.989006Z"}
