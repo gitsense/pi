@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const TARGET_ANALYZER = "session-review";
+const TARGET_ANALYZER = "instructions-session-review";
 const CODE_INTENT_ANALYZER = "code-intent";
 const RULES_SOURCE = "gsc-rules";
 const RULE_TOPIC = "agents-md";
@@ -26,42 +26,41 @@ function main() {
   const context = resolveRepositoryContext(repoRoot, flags);
   process.stderr.write(`[gsc] Reading ${CODE_INTENT_ANALYZER} analysis...\n`);
   const codeIntent = fetchAnalysis(repoRoot, CODE_INTENT_ANALYZER, context, false);
-  const rulesPath = path.resolve(repoRoot, flags.rulesFile || ".gitsense/rules/records.jsonl");
-  const rules = readAgentRules(rulesPath);
+  const rules = fetchAgentRules(repoRoot);
   const trackedFiles = listTrackedFiles(repoRoot);
-  process.stderr.write(`[session-review] Found ${rules.length} ${RULE_TOPIC} file rule(s)\n`);
+  process.stderr.write(`[instructions-session-review] Found ${rules.length} ${RULE_TOPIC} file rule(s)\n`);
 
   const records = buildRecords(codeIntent, rules, trackedFiles);
   const outputPath = path.resolve(
-    flags.output || path.join(os.tmpdir(), "gsc-pi-session-review.jsonl"),
+    flags.output || path.join(os.tmpdir(), "gsc-pi-instructions-session-review.jsonl"),
   );
   writeJSONL(outputPath, records);
-  process.stderr.write(`[session-review] Generated ${records.length} record(s)\n`);
-  process.stderr.write(`[session-review] Output: ${outputPath}\n`);
+  process.stderr.write(`[instructions-session-review] Generated ${records.length} record(s)\n`);
+  process.stderr.write(`[instructions-session-review] Output: ${outputPath}\n`);
 
   if (!flags.import) {
-    process.stderr.write("[session-review] Review the JSONL, then rerun with --import\n");
+    process.stderr.write("[instructions-session-review] Review the JSONL, then rerun with --import\n");
     return;
   }
 
   const existing = fetchAnalysis(repoRoot, TARGET_ANALYZER, context, true);
   const changed = filterChangedRecords(records, existing);
   process.stderr.write(
-    `[session-review] Change check: new=${changed.newCount}, changed=${changed.changedCount}, unchanged=${changed.unchangedCount}\n`,
+    `[instructions-session-review] Change check: new=${changed.newCount}, changed=${changed.changedCount}, unchanged=${changed.unchangedCount}\n`,
   );
 
   if (changed.records.length === 0) {
-    process.stderr.write("[session-review] No metadata changes detected; skipping import\n");
+    process.stderr.write("[instructions-session-review] No metadata changes detected; skipping import\n");
     return;
   }
 
   const importPath =
     changed.records.length === records.length
       ? outputPath
-      : path.join(os.tmpdir(), "gsc-pi-session-review-changed.jsonl");
+      : path.join(os.tmpdir(), "gsc-pi-instructions-session-review-changed.jsonl");
   if (importPath !== outputPath) {
     writeJSONL(importPath, changed.records);
-    process.stderr.write(`[session-review] Changed output: ${importPath}\n`);
+    process.stderr.write(`[instructions-session-review] Changed output: ${importPath}\n`);
   }
 
   runAnalysisSet(repoRoot, importPath, context, flags);
@@ -73,7 +72,6 @@ function parseFlags(args) {
     repo: "",
     branch: "",
     output: "",
-    rulesFile: "",
     import: false,
     dryRun: false,
     force: false,
@@ -88,7 +86,7 @@ function parseFlags(args) {
       case "--repo":
       case "--branch":
       case "--output":
-      case "--rules-file": {
+      {
         const value = args[index + 1];
         if (!value || value.startsWith("--")) {
           throw new Error(`${arg} requires a value`);
@@ -134,16 +132,15 @@ function toFlagName(arg) {
 }
 
 function printHelp() {
-  process.stdout.write("Build deterministic Pi session-review metadata.\n\n");
+  process.stdout.write("Build deterministic Pi instructions-session-review metadata.\n\n");
   process.stdout.write("Usage:\n");
-  process.stdout.write("  .gitsense/bin/build-session-review [flags]\n\n");
+  process.stdout.write("  .gitsense/bin/build-instructions-session-review [flags]\n\n");
   process.stdout.write("Flags:\n");
   process.stdout.write("  --owner <name>       GitSense Chat repository owner\n");
   process.stdout.write("  --repo <name>        GitSense Chat repository name\n");
   process.stdout.write("  --branch <name>      GitSense Chat branch name\n");
-  process.stdout.write("  --rules-file <path>  Rule JSONL (default: .gitsense/rules/records.jsonl)\n");
   process.stdout.write("  --output <path>      JSONL output path (default: system temp directory)\n");
-  process.stdout.write("  --import             Populate session-review with changed records\n");
+  process.stdout.write("  --import             Populate instructions-session-review with changed records\n");
   process.stdout.write("  --dry-run            Validate gsc app analysis set without writing\n");
   process.stdout.write("  --force              Overwrite existing changed records\n");
   process.stdout.write("  --self-test          Run deterministic formatter and matcher checks\n");
@@ -227,12 +224,13 @@ function fetchAnalysis(repoRoot, analyzer, context, tolerateMissing) {
   }
 
   const parsed = JSON.parse(result.stdout);
-  if (!Array.isArray(parsed.files)) {
+  const files = parsed.files === null ? [] : parsed.files;
+  if (!Array.isArray(files)) {
     throw new Error(`Invalid ${analyzer} response: expected a files array`);
   }
 
   const records = new Map();
-  for (const record of parsed.files) {
+  for (const record of files) {
     if (record && typeof record.file_path === "string") {
       records.set(normalizePath(record.file_path), record);
     }
@@ -241,26 +239,43 @@ function fetchAnalysis(repoRoot, analyzer, context, tolerateMissing) {
   return records;
 }
 
-function readAgentRules(rulesPath) {
-  if (!fs.existsSync(rulesPath)) {
-    throw new Error(`Rules file not found: ${rulesPath}`);
+function fetchAgentRules(repoRoot) {
+  const result = spawnSync(
+    "gsc",
+    ["rules", "list", "--scope", "repo", "--topic", RULE_TOPIC, "--format", "json"],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
+
+  if (result.error) {
+    throw new Error(`Failed to run gsc: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
+    throw new Error(`Failed to list ${RULE_TOPIC} rules: ${detail}`);
+  }
+
+  let sourcedRules;
+  try {
+    sourcedRules = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(`Invalid gsc rules JSON: ${error.message}`);
+  }
+  if (!Array.isArray(sourcedRules)) {
+    throw new Error("Invalid gsc rules response: expected an array");
   }
 
   const rules = [];
-  const lines = fs.readFileSync(rulesPath, "utf8").split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
-    if (!line) {
-      continue;
+  for (let index = 0; index < sourcedRules.length; index += 1) {
+    const item = sourcedRules[index];
+    if (!item || item.source !== "repo" || !item.rule || typeof item.rule !== "object") {
+      throw new Error(`Invalid gsc rules response at index ${index}: expected a repo-sourced rule`);
     }
-    let rule;
-    try {
-      rule = JSON.parse(line);
-    } catch (error) {
-      throw new Error(`Invalid rule JSON at ${rulesPath}:${index + 1}: ${error.message}`);
-    }
-    if (isAgentFileRule(rule)) {
-      rules.push(rule);
+    if (isAgentFileRule(item.rule)) {
+      rules.push(item.rule);
     }
   }
   return rules.sort(compareRules);
@@ -269,6 +284,7 @@ function readAgentRules(rulesPath) {
 function isAgentFileRule(rule) {
   return (
     rule &&
+    firstString(rule.id) !== "" &&
     rule.topic === RULE_TOPIC &&
     rule.type === "declarative" &&
     rule.enabled !== false &&
@@ -341,9 +357,9 @@ function buildRecord(filePath, codeIntent, rules) {
   return {
     file_path: filePath,
     fields: {
-      read_md: renderReadMarkdown(codeIntent),
-      edit_md: renderChangeMarkdown(codeIntent, editRuleMatches),
-      write_md: renderChangeMarkdown(codeIntent, writeRuleMatches),
+      read_items: buildReadItems(filePath, codeIntent),
+      edit_items: buildChangeItems(filePath, codeIntent, editRuleMatches),
+      write_items: buildChangeItems(filePath, codeIntent, writeRuleMatches),
       source_analyzers: sourceAnalyzers.sort(),
       source_fingerprint: sha256(stableStringify(sources)),
     },
@@ -434,28 +450,51 @@ function compareRules(left, right) {
   return firstString(left.summary, left.id).localeCompare(firstString(right.summary, right.id));
 }
 
-function renderReadMarkdown(codeIntent) {
-  const purpose = firstString(codeIntent.purpose);
-  return purpose ? `### File purpose\n\n${markdownText(purpose)}` : "";
+function buildReadItems(filePath, codeIntent) {
+  const context = buildFileContextItem(filePath, codeIntent);
+  return context ? [context] : [];
 }
 
-function renderChangeMarkdown(codeIntent, ruleMatches) {
-  const sections = [];
-  const purpose = firstString(codeIntent.purpose);
-  if (purpose) {
-    sections.push(`### File purpose\n\n${markdownText(purpose)}`);
+function buildChangeItems(filePath, codeIntent, ruleMatches) {
+  const items = buildReadItems(filePath, codeIntent);
+  for (const { rule, reason } of ruleMatches) {
+    const instructions = stringArray(rule.instructions);
+    const details = [];
+    if (instructions.length > 0) {
+      details.push(`### What to remember\n\n${bulletList(instructions)}`);
+    }
+    if (reason) {
+      details.push(`### Why this appears\n\n${markdownText(reason)}`);
+    }
+    const importance = firstString(rule.importance);
+    if (importance) {
+      details.push(`**Importance:** ${markdownText(titleCase(importance))}`);
+    }
+    items.push(reviewItem(
+      "AGENTS.md reminders",
+      `agents-md:${rule.id}`,
+      compactTitle(firstString(rule.summary, ...instructions), "Review repository instructions"),
+      details.join("\n\n") || "Review the applicable repository instruction.",
+    ));
   }
+  return items;
+}
 
-  if (ruleMatches.length > 0) {
-    const rows = ruleMatches.map(({ rule, reason }) => {
-      const reminder = firstString(...stringArray(rule.instructions), rule.summary);
-      return `| ${markdownCell(reminder)} | ${markdownCell(reason)} |`;
-    });
-    sections.push(
-      `### AGENTS.md reminders\n\n| What to remember | Why it appears |\n| :--- | :--- |\n${rows.join("\n")}`,
-    );
+function buildFileContextItem(filePath, codeIntent) {
+  const purpose = firstString(codeIntent.purpose);
+  if (!purpose) {
+    return null;
   }
-  return sections.join("\n\n");
+  return reviewItem(
+    "File context",
+    `file-context:${sha256(filePath).slice(0, 12)}`,
+    compactTitle(purpose, "Understand this file's role"),
+    `### File purpose\n\n${markdownText(purpose)}`,
+  );
+}
+
+function reviewItem(group, key, title, markdown) {
+  return { group, key, title, markdown };
 }
 
 function selectFields(record, names) {
@@ -522,8 +561,21 @@ function markdownText(value) {
   return cleanText(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function markdownCell(value) {
-  return markdownText(value).replace(/\|/g, "\\|");
+function compactTitle(value, fallback) {
+  const cleaned = cleanText(value || fallback).replace(/[.!?]+$/, "");
+  if (cleaned.length <= 72) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, 69).trimEnd()}…`;
+}
+
+function titleCase(value) {
+  const cleaned = cleanText(value);
+  return cleaned ? cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase() : "";
+}
+
+function bulletList(values) {
+  return values.map((value) => `- ${markdownText(value)}`).join("\n");
 }
 
 function stableStringify(value) {
@@ -565,9 +617,9 @@ function filterChangedRecords(records, existing) {
       continue;
     }
     const previousFields = {
-      read_md: typeof previous.read_md === "string" ? previous.read_md : "",
-      edit_md: typeof previous.edit_md === "string" ? previous.edit_md : "",
-      write_md: typeof previous.write_md === "string" ? previous.write_md : "",
+      read_items: Array.isArray(previous.read_items) ? normalizeValue(previous.read_items) : [],
+      edit_items: Array.isArray(previous.edit_items) ? normalizeValue(previous.edit_items) : [],
+      write_items: Array.isArray(previous.write_items) ? normalizeValue(previous.write_items) : [],
       source_analyzers: stringArray(previous.source_analyzers).sort(),
       source_fingerprint:
         typeof previous.source_fingerprint === "string" ? previous.source_fingerprint : "",
@@ -678,20 +730,22 @@ function runSelfTest() {
   const [record] = buildRecords(codeIntent, rules, [filePath]);
 
   assert(record.file_path === filePath, "file path");
-  assert(record.fields.read_md.includes("### File purpose"), "read purpose heading");
-  assert(record.fields.edit_md.includes("### AGENTS.md reminders"), "reminder heading");
-  assert(record.fields.edit_md.includes("Run the modified test"), "test reminder");
-  assert(record.fields.edit_md.includes("Use the suite harness"), "suite reminder");
-  assert(!record.fields.edit_md.includes("issue-number naming"), "write-only rule excluded from edit");
-  assert(record.fields.write_md.includes("issue-number naming"), "write-only rule included for write");
-  assert(!record.fields.edit_md.includes("Avoid broad test commands"), "command-only rule excluded");
+  assert(record.fields.read_items.length === 1, "one read item");
+  assert(record.fields.read_items[0].group === "File context", "read context group");
+  assert(record.fields.edit_items.some((item) => item.title === "Run every modified test"), "test reminder");
+  assert(record.fields.edit_items.some((item) => item.title === "Use the faux provider harness"), "suite reminder");
+  assert(!record.fields.edit_items.some((item) => item.markdown.includes("issue-number naming")), "write-only rule excluded from edit");
+  assert(record.fields.write_items.some((item) => item.markdown.includes("issue-number naming")), "write-only rule included for write");
+  assert(!record.fields.edit_items.some((item) => item.markdown.includes("Avoid broad test commands")), "command-only rule excluded");
+  assert(record.fields.edit_items.every((item) => item.group && item.key && item.title && item.markdown), "edit item contract");
+  assert(record.fields.write_items.every((item) => item.group && item.key && item.title && item.markdown), "write item contract");
   assert(record.fields.source_analyzers.includes(CODE_INTENT_ANALYZER), "code-intent source");
   assert(record.fields.source_analyzers.includes(RULES_SOURCE), "rules source");
   assert(record.fields.source_fingerprint.length === 64, "source fingerprint");
   assert(matchesGlob("packages/ai/test/example.ts", "packages/*/test/**/*.ts"), "zero-depth globstar");
   assert(matchesGlob(filePath, "packages/*/test/**/*.ts"), "nested globstar");
   assert(!matchesGlob("packages/ai/src/example.ts", "packages/*/test/**/*.ts"), "glob rejection");
-  process.stdout.write("pi session-review self-test passed\n");
+  process.stdout.write("Pi instructions-session-review self-test passed\n");
 }
 
 function assert(condition, label) {
