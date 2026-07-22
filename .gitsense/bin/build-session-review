@@ -1,0 +1,708 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const TARGET_ANALYZER = "session-review";
+const CODE_INTENT_ANALYZER = "code-intent";
+const RULES_SOURCE = "gsc-rules";
+const RULE_TOPIC = "agents-md";
+
+function main() {
+  const flags = parseFlags(process.argv.slice(2));
+  if (flags.help) {
+    printHelp();
+    return;
+  }
+  if (flags.selfTest) {
+    runSelfTest();
+    return;
+  }
+
+  const repoRoot = findRepoRoot(process.cwd());
+  const context = resolveRepositoryContext(repoRoot, flags);
+  process.stderr.write(`[gsc] Reading ${CODE_INTENT_ANALYZER} analysis...\n`);
+  const codeIntent = fetchAnalysis(repoRoot, CODE_INTENT_ANALYZER, context, false);
+  const rulesPath = path.resolve(repoRoot, flags.rulesFile || ".gitsense/rules/records.jsonl");
+  const rules = readAgentRules(rulesPath);
+  const trackedFiles = listTrackedFiles(repoRoot);
+  process.stderr.write(`[session-review] Found ${rules.length} ${RULE_TOPIC} file rule(s)\n`);
+
+  const records = buildRecords(codeIntent, rules, trackedFiles);
+  const outputPath = path.resolve(
+    flags.output || path.join(os.tmpdir(), "gsc-pi-session-review.jsonl"),
+  );
+  writeJSONL(outputPath, records);
+  process.stderr.write(`[session-review] Generated ${records.length} record(s)\n`);
+  process.stderr.write(`[session-review] Output: ${outputPath}\n`);
+
+  if (!flags.import) {
+    process.stderr.write("[session-review] Review the JSONL, then rerun with --import\n");
+    return;
+  }
+
+  const existing = fetchAnalysis(repoRoot, TARGET_ANALYZER, context, true);
+  const changed = filterChangedRecords(records, existing);
+  process.stderr.write(
+    `[session-review] Change check: new=${changed.newCount}, changed=${changed.changedCount}, unchanged=${changed.unchangedCount}\n`,
+  );
+
+  if (changed.records.length === 0) {
+    process.stderr.write("[session-review] No metadata changes detected; skipping import\n");
+    return;
+  }
+
+  const importPath =
+    changed.records.length === records.length
+      ? outputPath
+      : path.join(os.tmpdir(), "gsc-pi-session-review-changed.jsonl");
+  if (importPath !== outputPath) {
+    writeJSONL(importPath, changed.records);
+    process.stderr.write(`[session-review] Changed output: ${importPath}\n`);
+  }
+
+  runAnalysisSet(repoRoot, importPath, context, flags);
+}
+
+function parseFlags(args) {
+  const flags = {
+    owner: "",
+    repo: "",
+    branch: "",
+    output: "",
+    rulesFile: "",
+    import: false,
+    dryRun: false,
+    force: false,
+    help: false,
+    selfTest: false,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    switch (arg) {
+      case "--owner":
+      case "--repo":
+      case "--branch":
+      case "--output":
+      case "--rules-file": {
+        const value = args[index + 1];
+        if (!value || value.startsWith("--")) {
+          throw new Error(`${arg} requires a value`);
+        }
+        flags[toFlagName(arg)] = value;
+        index += 1;
+        break;
+      }
+      case "--import":
+        flags.import = true;
+        break;
+      case "--dry-run":
+        flags.dryRun = true;
+        break;
+      case "--force":
+        flags.force = true;
+        break;
+      case "--self-test":
+        flags.selfTest = true;
+        break;
+      case "--help":
+      case "-h":
+        flags.help = true;
+        break;
+      default:
+        throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  if (flags.dryRun && !flags.import) {
+    throw new Error("--dry-run requires --import");
+  }
+  if (flags.force && !flags.import) {
+    throw new Error("--force requires --import");
+  }
+  return flags;
+}
+
+function toFlagName(arg) {
+  return arg
+    .slice(2)
+    .replace(/-([a-z])/g, (_, character) => character.toUpperCase());
+}
+
+function printHelp() {
+  process.stdout.write("Build deterministic Pi session-review metadata.\n\n");
+  process.stdout.write("Usage:\n");
+  process.stdout.write("  .gitsense/bin/build-session-review [flags]\n\n");
+  process.stdout.write("Flags:\n");
+  process.stdout.write("  --owner <name>       GitSense Chat repository owner\n");
+  process.stdout.write("  --repo <name>        GitSense Chat repository name\n");
+  process.stdout.write("  --branch <name>      GitSense Chat branch name\n");
+  process.stdout.write("  --rules-file <path>  Rule JSONL (default: .gitsense/rules/records.jsonl)\n");
+  process.stdout.write("  --output <path>      JSONL output path (default: system temp directory)\n");
+  process.stdout.write("  --import             Populate session-review with changed records\n");
+  process.stdout.write("  --dry-run            Validate gsc app analysis set without writing\n");
+  process.stdout.write("  --force              Overwrite existing changed records\n");
+  process.stdout.write("  --self-test          Run deterministic formatter and matcher checks\n");
+  process.stdout.write("  -h, --help           Show this help\n");
+}
+
+function findRepoRoot(startDir) {
+  let current = path.resolve(startDir);
+  while (true) {
+    if (fs.existsSync(path.join(current, ".git"))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      throw new Error("Could not find a Git repository from the current directory");
+    }
+    current = parent;
+  }
+}
+
+function resolveRepositoryContext(repoRoot, flags) {
+  const context = {
+    owner: flags.owner,
+    repo: flags.repo,
+    branch: flags.branch,
+  };
+  if (context.owner && context.repo && context.branch) {
+    return context;
+  }
+
+  const manifestPath = path.join(repoRoot, ".gitsense", "manifests", "code-intent.json");
+  if (fs.existsSync(manifestPath)) {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const repositoryName = manifest.repositories?.[0]?.name;
+    const branchName = manifest.branches?.[0]?.name;
+    if (typeof repositoryName === "string" && repositoryName.includes("/")) {
+      const separator = repositoryName.indexOf("/");
+      context.owner ||= repositoryName.slice(0, separator);
+      context.repo ||= repositoryName.slice(separator + 1);
+    }
+    if (typeof branchName === "string") {
+      context.branch ||= branchName;
+    }
+  }
+
+  if (!context.owner || !context.repo || !context.branch) {
+    throw new Error(
+      "Could not determine GitSense Chat repository context. Provide --owner, --repo, and --branch.",
+    );
+  }
+  return context;
+}
+
+function fetchAnalysis(repoRoot, analyzer, context, tolerateMissing) {
+  const args = [
+    "app",
+    "analysis",
+    "get",
+    "--analyzer",
+    analyzer,
+    "--list",
+    "--format",
+    "json",
+    ...contextArgs(context),
+  ];
+  const result = spawnSync("gsc", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+
+  if (result.error) {
+    throw new Error(`Failed to run gsc: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    if (tolerateMissing) {
+      return new Map();
+    }
+    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
+    throw new Error(`Failed to read ${analyzer} analysis: ${detail}`);
+  }
+
+  const parsed = JSON.parse(result.stdout);
+  if (!Array.isArray(parsed.files)) {
+    throw new Error(`Invalid ${analyzer} response: expected a files array`);
+  }
+
+  const records = new Map();
+  for (const record of parsed.files) {
+    if (record && typeof record.file_path === "string") {
+      records.set(normalizePath(record.file_path), record);
+    }
+  }
+  process.stderr.write(`[gsc] Found ${records.size} ${analyzer} record(s)\n`);
+  return records;
+}
+
+function readAgentRules(rulesPath) {
+  if (!fs.existsSync(rulesPath)) {
+    throw new Error(`Rules file not found: ${rulesPath}`);
+  }
+
+  const rules = [];
+  const lines = fs.readFileSync(rulesPath, "utf8").split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line) {
+      continue;
+    }
+    let rule;
+    try {
+      rule = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`Invalid rule JSON at ${rulesPath}:${index + 1}: ${error.message}`);
+    }
+    if (isAgentFileRule(rule)) {
+      rules.push(rule);
+    }
+  }
+  return rules.sort(compareRules);
+}
+
+function isAgentFileRule(rule) {
+  return (
+    rule &&
+    rule.topic === RULE_TOPIC &&
+    rule.type === "declarative" &&
+    rule.enabled !== false &&
+    Array.isArray(rule.actions) &&
+    rule.actions.some((action) => action === "edit" || action === "write") &&
+    (stringArray(rule.glob_patterns).length > 0 ||
+      stringArray(rule.applies_to?.files).length > 0)
+  );
+}
+
+function listTrackedFiles(repoRoot) {
+  const result = spawnSync("git", ["ls-files", "-z"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.error) {
+    throw new Error(`Failed to run git: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const detail = result.stderr.trim() || `exit ${result.status}`;
+    throw new Error(`Failed to list tracked files: ${detail}`);
+  }
+  return result.stdout.split("\0").filter(Boolean).map(normalizePath);
+}
+
+function buildRecords(codeIntent, rules, trackedFiles) {
+  const filePaths = new Set(codeIntent.keys());
+  for (const filePath of trackedFiles) {
+    if (
+      findMatchingRules(filePath, rules, "edit").length > 0 ||
+      findMatchingRules(filePath, rules, "write").length > 0
+    ) {
+      filePaths.add(filePath);
+    }
+  }
+
+  return [...filePaths]
+    .sort((left, right) => left.localeCompare(right))
+    .map((filePath) => buildRecord(filePath, codeIntent.get(filePath) || {}, rules));
+}
+
+function buildRecord(filePath, codeIntent, rules) {
+  const editRuleMatches = findMatchingRules(filePath, rules, "edit");
+  const writeRuleMatches = findMatchingRules(filePath, rules, "write");
+  const ruleMatches = uniqueRuleMatches([...editRuleMatches, ...writeRuleMatches]);
+  const purposeSource = selectFields(codeIntent, ["purpose", "parent_keywords", "mechanism"]);
+  const ruleSource = ruleMatches.map(({ rule, reason }) => ({
+    id: rule.id,
+    updated_at: rule.updated_at,
+    event: rule.event,
+    actions: stringArray(rule.actions),
+    importance: rule.importance,
+    summary: rule.summary,
+    instructions: stringArray(rule.instructions),
+    reason,
+  }));
+  const sources = {
+    [CODE_INTENT_ANALYZER]: purposeSource,
+    [RULES_SOURCE]: ruleSource,
+  };
+  const sourceAnalyzers = [];
+  if (Object.keys(purposeSource).length > 0) {
+    sourceAnalyzers.push(CODE_INTENT_ANALYZER);
+  }
+  if (ruleSource.length > 0) {
+    sourceAnalyzers.push(RULES_SOURCE);
+  }
+
+  return {
+    file_path: filePath,
+    fields: {
+      read_md: renderReadMarkdown(codeIntent),
+      edit_md: renderChangeMarkdown(codeIntent, editRuleMatches),
+      write_md: renderChangeMarkdown(codeIntent, writeRuleMatches),
+      source_analyzers: sourceAnalyzers.sort(),
+      source_fingerprint: sha256(stableStringify(sources)),
+    },
+  };
+}
+
+function findMatchingRules(filePath, rules, operation) {
+  const matches = [];
+  for (const rule of rules) {
+    if (!stringArray(rule.actions).includes(operation)) {
+      continue;
+    }
+    const reason = matchRulePath(filePath, rule);
+    if (reason) {
+      matches.push({ rule, reason });
+    }
+  }
+  return matches.sort(({ rule: left }, { rule: right }) => compareRules(left, right));
+}
+
+function uniqueRuleMatches(matches) {
+  const unique = new Map();
+  for (const match of matches) {
+    unique.set(match.rule.id, match);
+  }
+  return [...unique.values()].sort(({ rule: left }, { rule: right }) => compareRules(left, right));
+}
+
+function matchRulePath(filePath, rule) {
+  const normalizedPath = normalizePath(filePath);
+  const excludes = stringArray(rule.exclude_globs);
+  if (excludes.some((pattern) => matchesGlob(normalizedPath, pattern))) {
+    return "";
+  }
+
+  const exactFiles = stringArray(rule.applies_to?.files).map(normalizePath);
+  if (exactFiles.includes(normalizedPath)) {
+    return "This rule names this file.";
+  }
+
+  for (const pattern of stringArray(rule.glob_patterns)) {
+    if (matchesGlob(normalizedPath, pattern)) {
+      return `This file matches \`${pattern}\`.`;
+    }
+  }
+  return "";
+}
+
+function matchesGlob(filePath, pattern) {
+  return globToRegExp(normalizePath(pattern)).test(normalizePath(filePath));
+}
+
+function globToRegExp(pattern) {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === "*") {
+      if (pattern[index + 1] === "*") {
+        index += 1;
+        if (pattern[index + 1] === "/") {
+          index += 1;
+          source += "(?:.*/)?";
+        } else {
+          source += ".*";
+        }
+      } else {
+        source += "[^/]*";
+      }
+    } else if (character === "?") {
+      source += "[^/]";
+    } else {
+      source += escapeRegExp(character);
+    }
+  }
+  return new RegExp(`${source}$`);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+function compareRules(left, right) {
+  const rank = { high: 0, medium: 1, low: 2 };
+  const importance = (rank[left.importance] ?? 3) - (rank[right.importance] ?? 3);
+  if (importance !== 0) {
+    return importance;
+  }
+  return firstString(left.summary, left.id).localeCompare(firstString(right.summary, right.id));
+}
+
+function renderReadMarkdown(codeIntent) {
+  const purpose = firstString(codeIntent.purpose);
+  return purpose ? `### File purpose\n\n${markdownText(purpose)}` : "";
+}
+
+function renderChangeMarkdown(codeIntent, ruleMatches) {
+  const sections = [];
+  const purpose = firstString(codeIntent.purpose);
+  if (purpose) {
+    sections.push(`### File purpose\n\n${markdownText(purpose)}`);
+  }
+
+  if (ruleMatches.length > 0) {
+    const rows = ruleMatches.map(({ rule, reason }) => {
+      const reminder = firstString(...stringArray(rule.instructions), rule.summary);
+      return `| ${markdownCell(reminder)} | ${markdownCell(reason)} |`;
+    });
+    sections.push(
+      `### AGENTS.md reminders\n\n| What to remember | Why it appears |\n| :--- | :--- |\n${rows.join("\n")}`,
+    );
+  }
+  return sections.join("\n\n");
+}
+
+function selectFields(record, names) {
+  const selected = {};
+  for (const name of names) {
+    if (record[name] !== undefined && record[name] !== null && record[name] !== "N/A") {
+      selected[name] = normalizeValue(record[name]);
+    }
+  }
+  return selected;
+}
+
+function normalizeValue(value) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+        (trimmed.startsWith("{") && trimmed.endsWith("}"))) {
+      try {
+        return normalizeValue(JSON.parse(trimmed));
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(normalizeValue);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, normalizeValue(item)]),
+    );
+  }
+  return value;
+}
+
+function stringArray(value) {
+  const normalized = normalizeValue(value);
+  if (!Array.isArray(normalized)) {
+    return [];
+  }
+  return [...new Set(normalized.filter((item) => typeof item === "string").map(cleanText).filter(Boolean))];
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string") {
+      const cleaned = cleanText(value);
+      if (cleaned && cleaned !== "N/A") {
+        return cleaned;
+      }
+    }
+  }
+  return "";
+}
+
+function cleanText(value) {
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function markdownText(value) {
+  return cleanText(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function markdownCell(value) {
+  return markdownText(value).replace(/\|/g, "\\|");
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function normalizePath(filePath) {
+  return filePath.replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function writeJSONL(outputPath, records) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const body = records.map((record) => JSON.stringify(record)).join("\n");
+  fs.writeFileSync(outputPath, body ? `${body}\n` : "", "utf8");
+}
+
+function filterChangedRecords(records, existing) {
+  const changed = [];
+  let newCount = 0;
+  let changedCount = 0;
+  let unchangedCount = 0;
+
+  for (const record of records) {
+    const previous = existing.get(record.file_path);
+    if (!previous) {
+      changed.push(record);
+      newCount += 1;
+      continue;
+    }
+    const previousFields = {
+      read_md: typeof previous.read_md === "string" ? previous.read_md : "",
+      edit_md: typeof previous.edit_md === "string" ? previous.edit_md : "",
+      write_md: typeof previous.write_md === "string" ? previous.write_md : "",
+      source_analyzers: stringArray(previous.source_analyzers).sort(),
+      source_fingerprint:
+        typeof previous.source_fingerprint === "string" ? previous.source_fingerprint : "",
+    };
+    if (sha256(stableStringify(record.fields)) === sha256(stableStringify(previousFields))) {
+      unchangedCount += 1;
+    } else {
+      changed.push(record);
+      changedCount += 1;
+    }
+  }
+  return { records: changed, newCount, changedCount, unchangedCount };
+}
+
+function runAnalysisSet(repoRoot, bulkPath, context, flags) {
+  const args = [
+    "app",
+    "analysis",
+    "set",
+    "--analyzer",
+    TARGET_ANALYZER,
+    "--bulk",
+    bulkPath,
+    ...contextArgs(context),
+  ];
+  if (flags.dryRun) {
+    args.push("--dry-run");
+  }
+  if (flags.force) {
+    args.push("--force");
+  }
+
+  const result = spawnSync("gsc", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  if (result.error) {
+    throw new Error(`Failed to run gsc: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`gsc app analysis set failed with exit code ${result.status}`);
+  }
+}
+
+function contextArgs(context) {
+  return ["--owner", context.owner, "--repo", context.repo, "--branch", context.branch];
+}
+
+function runSelfTest() {
+  const codeIntent = new Map([
+    [
+      "packages/coding-agent/test/suite/regressions/5217-compaction-reason.test.ts",
+      {
+        purpose: "Tests compaction reason events and retry behavior using the coding-agent suite harness.",
+        parent_keywords: ["compaction", "testing"],
+        mechanism: "vitest-suite",
+      },
+    ],
+  ]);
+  const rules = [
+    {
+      id: "check",
+      topic: RULE_TOPIC,
+      type: "declarative",
+      event: "post_tool_use",
+      actions: ["edit", "write"],
+      glob_patterns: ["packages/*/test/**/*.ts"],
+      importance: "high",
+      instructions: ["Run the modified test and iterate until it passes."],
+      summary: "Run every modified test",
+    },
+    {
+      id: "harness",
+      topic: RULE_TOPIC,
+      type: "declarative",
+      event: "pre_tool_use",
+      actions: ["edit", "write"],
+      glob_patterns: ["packages/coding-agent/test/suite/**/*.ts"],
+      importance: "high",
+      instructions: ["Use the suite harness with the faux provider."],
+      summary: "Use the faux provider harness",
+    },
+    {
+      id: "command-only",
+      topic: RULE_TOPIC,
+      type: "declarative",
+      event: "pre_tool_use",
+      actions: ["bash"],
+      command_filter: "npm test",
+      importance: "high",
+      instructions: ["Avoid broad test commands."],
+      summary: "Avoid broad test commands",
+    },
+    {
+      id: "write-only",
+      topic: RULE_TOPIC,
+      type: "declarative",
+      event: "pre_tool_use",
+      actions: ["write"],
+      glob_patterns: ["packages/coding-agent/test/suite/regressions/**/*.ts"],
+      importance: "medium",
+      instructions: ["Use the issue-number naming convention."],
+      summary: "Use the regression naming convention",
+    },
+  ].filter(isAgentFileRule).sort(compareRules);
+  const filePath = "packages/coding-agent/test/suite/regressions/5217-compaction-reason.test.ts";
+  const [record] = buildRecords(codeIntent, rules, [filePath]);
+
+  assert(record.file_path === filePath, "file path");
+  assert(record.fields.read_md.includes("### File purpose"), "read purpose heading");
+  assert(record.fields.edit_md.includes("### AGENTS.md reminders"), "reminder heading");
+  assert(record.fields.edit_md.includes("Run the modified test"), "test reminder");
+  assert(record.fields.edit_md.includes("Use the suite harness"), "suite reminder");
+  assert(!record.fields.edit_md.includes("issue-number naming"), "write-only rule excluded from edit");
+  assert(record.fields.write_md.includes("issue-number naming"), "write-only rule included for write");
+  assert(!record.fields.edit_md.includes("Avoid broad test commands"), "command-only rule excluded");
+  assert(record.fields.source_analyzers.includes(CODE_INTENT_ANALYZER), "code-intent source");
+  assert(record.fields.source_analyzers.includes(RULES_SOURCE), "rules source");
+  assert(record.fields.source_fingerprint.length === 64, "source fingerprint");
+  assert(matchesGlob("packages/ai/test/example.ts", "packages/*/test/**/*.ts"), "zero-depth globstar");
+  assert(matchesGlob(filePath, "packages/*/test/**/*.ts"), "nested globstar");
+  assert(!matchesGlob("packages/ai/src/example.ts", "packages/*/test/**/*.ts"), "glob rejection");
+  process.stdout.write("pi session-review self-test passed\n");
+}
+
+function assert(condition, label) {
+  if (!condition) {
+    throw new Error(`Self-test failed: ${label}`);
+  }
+}
+
+try {
+  main();
+} catch (error) {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+}
