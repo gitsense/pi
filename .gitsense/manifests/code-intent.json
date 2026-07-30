@@ -16295,17 +16295,17 @@
     {
       "repo_ref": "R0",
       "branch_ref": "B0",
-      "file_path": ".gitsense/bin/build-instructions-session-review",
+      "file_path": ".gitsense/bin/build-agents-md",
       "language": "plaintext",
       "chat_id": 8611,
       "fields": {
-        "F0": ".gitsense/bin/build-instructions-session-review",
-        "F1": "build-instructions-session-review",
+        "F0": ".gitsense/bin/build-agents-md",
+        "F1": "build-agents-md",
         "F3": "8611",
-        "F4": "Builds session-review metadata by matching code-intent analysis with AGENTS.md rules and generating deterministic JSONL records with source fingerprints.",
+        "F4": "Builds deterministic AGENTS.md catch metadata by matching file-scoped repository rules and generating JSONL records with source fingerprints.",
         "F5": "source_code",
         "F7": [
-          "build-session-metadata",
+          "build-agents-md-catches",
           "match-file-rules",
           "generate-jsonl-output",
           "compare-record-fingerprint",
@@ -16313,15 +16313,17 @@
         ],
         "F8": [
           "metadata-generation",
-          "code-analysis",
+          "repository-instructions",
           "rule-matching"
         ],
         "F9": [
           "main",
           "buildRecords",
+          "buildCatchItems",
           "findMatchingRules",
           "matchesGlob",
           "filterChangedRecords",
+          "compactLabels",
           "RULE_TOPIC",
           "RULES_SOURCE",
           "TARGET_ANALYZER"
@@ -16333,38 +16335,37 @@
     {
       "repo_ref": "R0",
       "branch_ref": "B0",
-      "file_path": ".gitsense/analyzers/instructions-session-review/file-content/default/1.md",
+      "file_path": ".gitsense/analyzers/agents-md/file-content/default/1.md",
       "language": "markdown",
       "chat_id": 8616,
       "fields": {
-        "F0": ".gitsense/analyzers/instructions-session-review/file-content/default/1.md",
+        "F0": ".gitsense/analyzers/agents-md/file-content/default/1.md",
         "F1": "1",
         "F2": "md",
         "F3": "8616",
-        "F4": "Modify this file to change how review items are classified, validated, and stored for file-read, file-edit, and file-write events, or to adjust the deterministic metadata contract without LLM inference.",
+        "F4": "Modify this file to change how deterministic AGENTS.md catches are validated and stored, or to adjust the session metadata contract without LLM inference.",
         "F5": "documentation",
         "F7": [
-          "store-review-items",
-          "classify-file-events",
-          "match-agent-rules",
-          "format-compact-markdown",
+          "store-agents-md-catches",
+          "match-file-rules",
+          "preserve-short-long-markdown",
           "validate-deterministic-fields",
           "merge-stable-rule-keys",
-          "preserve-item-groups"
+          "preserve-catch-groups"
         ],
         "F8": [
-          "file-activity-review",
-          "session-enrichment",
+          "agents-md",
+          "session-metadata",
           "deterministic-pipeline",
           "rule-matching"
         ],
         "F9": [
-          "read_items",
-          "edit_items",
-          "write_items",
+          "catch",
+          "short_markdown",
+          "long_markdown",
           "source_fingerprint",
           "agents-md",
-          "review-item"
+          "catch-item"
         ],
         "F10": "analyzer-schema"
       }
@@ -16372,37 +16373,38 @@
     {
       "repo_ref": "R0",
       "branch_ref": "B0",
-      "file_path": ".gitsense/analyzers/instructions-session-review/README.md",
+      "file_path": ".gitsense/analyzers/agents-md/README.md",
       "language": "markdown",
       "chat_id": 8617,
       "fields": {
-        "F0": ".gitsense/analyzers/instructions-session-review/README.md",
+        "F0": ".gitsense/analyzers/agents-md/README.md",
         "F1": "README",
         "F2": "md",
         "F3": "8617",
-        "F4": "Modify this file to change how the Instructions Session Review Analyzer is documented, installed, built, or how its review items and session export enrichment are explained to users.",
+        "F4": "Modify this file to change how the AGENTS.md Catch Analyzer is documented, installed, built, or configured for Pi session metadata.",
         "F5": "documentation",
         "F7": [
-          "install-analyzer",
-          "review-file-events",
+          "install-agents-md-analyzer",
+          "review-agents-md-catches",
           "export-pi-sessions",
           "generate-reviewable-jsonl",
           "validate-import-path",
-          "enrich-session-export",
-          "build-review-items"
+          "configure-session-metadata",
+          "build-catch-metadata"
         ],
         "F8": [
           "analyzer-ecosystem",
-          "session-review",
+          "agents-md",
           "repository-instructions",
           "documentation"
         ],
         "F9": [
-          "instructions-session-review",
-          "build-instructions-session-review",
-          "code-intent",
+          "agents-md",
+          "build-agents-md",
           "gsc-rules",
-          "review items"
+          "catch",
+          "short_markdown",
+          "long_markdown"
         ],
         "F10": "readme"
       }

@@ -9,6 +9,17 @@
 >
 > The included Brains cover docs, code intent, TypeScript dependency navigation, and implicit todos. Ask Pi to use the Brains before planning changes, then verify important findings against source.
 
+GitSense Chat can also make this repository's `AGENTS.md` guidance file-aware.
+Build the deterministic catches with `.gitsense/bin/build-agents-md`, then
+configure Pi session metadata with:
+
+```text
+read,write,edit::agents-md::catch
+```
+
+This surfaces instructions that apply to touched files for review. It does not
+replace `AGENTS.md` or claim that the agent missed an instruction.
+
 <p align="center">
   <a href="https://pi.dev">
     <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
