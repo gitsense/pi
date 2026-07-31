@@ -1,0 +1,582 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const ANALYZER_ID = "session-memory";
+const BRAIN_NAME = "memory";
+const FIELD_NAME = "context";
+const SESSION_FILE_PATH = "__gsc_session__";
+
+function main() {
+  try {
+    const flags = parseFlags(process.argv.slice(2));
+    if (flags.help) {
+      printHelp();
+      return;
+    }
+    if (flags.selfTest) {
+      runSelfTest();
+      return;
+    }
+    if (!flags.session) {
+      throw new Error("--session is required");
+    }
+
+    const exportData = exportSession(flags.session, flags.gsc);
+    const records = buildSessionRecords(exportData);
+    const manifest = buildManifest(flags.session, exportData, records);
+    const outputPath = path.resolve(
+      flags.output || path.join(os.tmpdir(), `gsc-pi-${BRAIN_NAME}-${flags.session}.json`),
+    );
+    fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+
+    process.stderr.write(`[${ANALYZER_ID}] Session: ${flags.session}\n`);
+    process.stderr.write(`[${ANALYZER_ID}] Generated ${records.length} metadata item(s)\n`);
+    process.stderr.write(`[${ANALYZER_ID}] Manifest: ${outputPath}\n`);
+
+    if (!flags.import) {
+      process.stderr.write(`[${ANALYZER_ID}] Review the manifest, then rerun with --import\n`);
+      return;
+    }
+
+    const result = importSessionBrain(flags.session, outputPath, flags.gsc);
+    if (result.stdout.trim()) {
+      process.stdout.write(result.stdout.trimEnd() + "\n");
+    }
+  } catch (error) {
+    process.stderr.write(`[${ANALYZER_ID}] ${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
+function parseFlags(args) {
+  const flags = {
+    session: "",
+    output: "",
+    gsc: "gsc",
+    import: false,
+    help: false,
+    selfTest: false,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    switch (arg) {
+      case "--session":
+      case "--output":
+      case "--gsc": {
+        const value = args[index + 1];
+        if (!value || value.startsWith("--")) {
+          throw new Error(`${arg} requires a value`);
+        }
+        flags[arg.slice(2)] = value;
+        index += 1;
+        break;
+      }
+      case "--import":
+        flags.import = true;
+        break;
+      case "--self-test":
+        flags.selfTest = true;
+        break;
+      case "--help":
+      case "-h":
+        flags.help = true;
+        break;
+      default:
+        throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+  return flags;
+}
+
+function printHelp() {
+  process.stdout.write("Build deterministic session metadata from a Pi session export.\n\n");
+  process.stdout.write("Usage:\n");
+  process.stdout.write("  .gitsense/bin/build-session-memory --session <uuid> [flags]\n\n");
+  process.stdout.write("Flags:\n");
+  process.stdout.write("  --session <uuid>   Pi session UUID\n");
+  process.stdout.write("  --output <path>    Manifest path (default: system temp directory)\n");
+  process.stdout.write("  --import           Replace the session memory Brain\n");
+  process.stdout.write("  --gsc <path>       gsc executable (default: gsc)\n");
+  process.stdout.write("  --self-test        Run deterministic parser checks\n");
+  process.stdout.write("  -h, --help         Show this help\n");
+}
+
+function exportSession(session, gsc) {
+  const result = spawnSync(
+    gsc,
+    [
+      "pi",
+      "sessions",
+      "export",
+      "--format",
+      "gsc-json",
+      "--uuid",
+      session,
+      "--head-events",
+      "0",
+      "--tail-events",
+      "0",
+      "--capsule-mode",
+      "compaction-aware",
+    ],
+    { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 },
+  );
+  if (result.error) {
+    throw new Error(`could not run gsc export: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`gsc export failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`}`);
+  }
+  let data;
+  try {
+    data = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(`gsc export returned invalid JSON: ${error.message}`);
+  }
+  if (data.status !== "success") {
+    throw new Error(data.message || "gsc export failed");
+  }
+  return data;
+}
+
+function importSessionBrain(session, manifestPath, gsc) {
+  const result = spawnSync(
+    gsc,
+    [
+      "pi",
+      "sessions",
+      "brain",
+      "import",
+      "--session",
+      session,
+      "--brain",
+      BRAIN_NAME,
+      "--manifest",
+      manifestPath,
+      "--format",
+      "json",
+    ],
+    { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (result.error) {
+    throw new Error(`could not import session Brain: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`session Brain import failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`}`);
+  }
+  return result;
+}
+
+function buildManifest(session, exportData, records) {
+  const pi = exportData.chat?.meta?.pi || {};
+  return {
+    schema_version: "1.0",
+    generated_at: new Date().toISOString(),
+    manifest: {
+      name: `${BRAIN_NAME}-${session}`,
+      database_name: BRAIN_NAME,
+      description: "Deterministic session activity and context signals extracted from a Pi session log.",
+      tags: ["pi", "session", "typescript", "review"],
+    },
+    repositories: [
+      {
+        ref: "session",
+        name: pi.repo_root || pi.cwd || "Pi session",
+      },
+    ],
+    branches: [
+      {
+        ref: "session",
+        name: pi.session_uuid || session,
+      },
+    ],
+    analyzers: [
+      {
+        ref: "A0",
+        id: ANALYZER_ID,
+        name: ANALYZER_ID,
+        description: "Extracts deterministic review signals from a Pi session export.",
+        version: "1.0",
+      },
+    ],
+    fields: [
+      {
+        ref: "F0",
+        analyzer_ref: "A0",
+        name: FIELD_NAME,
+        display_name: "Session context",
+        type: "array",
+        description: "Structured review signals derived from observable session activity.",
+      },
+    ],
+    data: [
+      {
+        repo_ref: "session",
+        branch_ref: "session",
+        file_path: SESSION_FILE_PATH,
+        language: "Session",
+        chat_id: 1,
+        fields: { F0: records },
+      },
+    ],
+  };
+}
+
+function buildSessionRecords(exportData) {
+  const events = collectEvents(exportData);
+  const tools = events.flatMap((event) => extractTools(event));
+  const reads = tools.filter((tool) => tool.name === "read");
+  const fileEdits = tools.filter((tool) => tool.name === "edit" || tool.name === "write");
+  const commands = tools.filter((tool) => tool.name === "bash");
+  const typescriptSession = isTypeScriptSession(tools);
+  const records = [];
+
+  const commandRecords = buildCommandRecords(commands, typescriptSession);
+  records.push(...commandRecords);
+
+  const readRecord = buildReadCoverageRecord(reads, typescriptSession);
+  if (readRecord) records.push(readRecord);
+
+  const orderingRecords = buildReadOrderingRecords(reads, fileEdits);
+  records.push(...orderingRecords);
+
+  const verificationRecord = buildVerificationRecord(commands, fileEdits, typescriptSession);
+  if (verificationRecord) records.push(verificationRecord);
+
+  const errorRecord = buildErrorRecord(tools);
+  if (errorRecord) records.push(errorRecord);
+
+  const timingRecord = buildTimingRecord(events);
+  if (timingRecord) records.push(timingRecord);
+
+  return records.sort((left, right) => left.key.localeCompare(right.key));
+}
+
+function collectEvents(exportData) {
+  const candidates = [
+    ...eventArray(exportData.chat?.head),
+    ...eventArray(exportData.chat?.capsule),
+    ...eventArray(exportData.chat?.compacted_capsule),
+    ...eventArray(exportData.chat?.tail),
+  ];
+  const seen = new Set();
+  return candidates
+    .filter((event) => {
+      const identity = `${event.type || ""}\x00${event.entry_id || event.id || ""}`;
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    })
+    .sort((left, right) => (left.id || 0) - (right.id || 0));
+}
+
+function eventArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.messages)) return value.messages;
+  return [];
+}
+
+function extractTools(event) {
+  if (event.type !== "pi-tools" || typeof event.message !== "string") return [];
+  let payload;
+  try {
+    payload = JSON.parse(event.message);
+  } catch {
+    return [];
+  }
+  return (payload.tools || []).map((tool, index) => ({
+    name: tool.tool_name || tool.name || "unknown",
+    args: tool.arguments || {},
+    status: tool.status || "unknown",
+    isError: tool.is_error === true,
+    resultText: tool.result_text || "",
+    eventId: event.id,
+    entryId: event.entry_id || "",
+    timestamp: event.created_at || event.timestamp || "",
+    ordinal: index,
+  }));
+}
+
+function buildCommandRecords(commands, typescriptSession) {
+  const byCategory = new Map();
+  for (const command of commands) {
+    const category = classifyCommand(command.args.command || "");
+    if (!category) continue;
+    if (!byCategory.has(category)) byCategory.set(category, new Map());
+    const byCommand = byCategory.get(category);
+    const display = displayCommand(command.args.command || "");
+    const existing = byCommand.get(display) || { count: 0, errors: 0, last: command.timestamp };
+    existing.count += 1;
+    if (command.isError || command.status !== "success") existing.errors += 1;
+    existing.last = command.timestamp || existing.last;
+    byCommand.set(display, existing);
+  }
+
+  return [...byCategory.entries()].map(([category, byCommand]) => {
+    const entries = [...byCommand.entries()].sort((left, right) => left[0].localeCompare(right[0]));
+    const total = entries.reduce((sum, [, value]) => sum + value.count, 0);
+    const commandText = compactCommandList(entries);
+    const errors = entries.reduce((sum, [, value]) => sum + value.errors, 0);
+    const title = `${capitalize(category)}: ${commandText} (${total})`;
+    const lines = entries.map(([command, value]) => `- \`${command}\` — ${value.count} occurrence${value.count === 1 ? "" : "s"}${value.errors ? `; ${value.errors} reported error${value.errors === 1 ? "" : "s"}` : ""}`);
+    return reviewItem(
+      `commands:${category}`,
+      title,
+      `The agent ran ${total} ${category} command${total === 1 ? "" : "s"}.`,
+      `### ${capitalize(category)} commands\n\n${lines.join("\n")}\n\nCommand status is based on the exported tool result. Shell pipelines may make the underlying exit status unknown.`,
+      [category, "commands", ...(category === "build" || category === "typecheck" || category === "test" ? ["verification"] : []), ...(typescriptSession ? ["typescript"] : [])],
+      errors ? ["errors"] : [],
+    );
+  });
+}
+
+function buildReadCoverageRecord(reads, typescriptSession) {
+  if (reads.length === 0) return null;
+  const partial = reads.filter((read) => readCoverage(read) === "partial");
+  const full = reads.filter((read) => readCoverage(read) === "full");
+  const unknown = reads.filter((read) => readCoverage(read) === "unknown");
+  const partialFiles = unique(reads.filter((read) => readCoverage(read) === "partial").map((read) => filePath(read.args.path)));
+  const fullFiles = unique(reads.filter((read) => readCoverage(read) === "full").map((read) => filePath(read.args.path)));
+  const title = `Reads: ${partial.length} partial reads across ${partialFiles.length} files`;
+  const lines = [
+    `- Partial reads: ${partial.length} across ${partialFiles.length} files`,
+    `- Reads without a visible truncation marker: ${full.length} across ${fullFiles.length} files`,
+  ];
+  if (unknown.length) lines.push(`- Unknown coverage: ${unknown.length} reads`);
+  if (partialFiles.length) lines.push(`- Partial files: ${partialFiles.map((value) => `\`${value}\``).join(", ")}`);
+  return reviewItem(
+    "reads:coverage",
+    title,
+    `The session returned ${partial.length} partial file read${partial.length === 1 ? "" : "s"}.`,
+    `### Read coverage\n\n${lines.join("\n")}\n\nA read is marked partial when the tool supplied a bounded range or the result contained a truncation marker. A read without that evidence is a full candidate, not proof that the agent understood the entire file.`,
+    ["reads", "memory", "partial-read", ...(typescriptSession ? ["typescript"] : [])],
+  );
+}
+
+function buildReadOrderingRecords(reads, edits) {
+  const files = new Map();
+  for (const read of reads) {
+    const key = filePath(read.args.path);
+    if (!key) continue;
+    if (!files.has(key)) files.set(key, { reads: [], edits: [] });
+    files.get(key).reads.push(read);
+  }
+  for (const edit of edits) {
+    const key = filePath(edit.args.path);
+    if (!key) continue;
+    if (!files.has(key)) files.set(key, { reads: [], edits: [] });
+    files.get(key).edits.push(edit);
+  }
+
+  const partialBeforeEdit = [];
+  const withoutRead = [];
+  for (const [file, activity] of files.entries()) {
+    if (activity.edits.length === 0) continue;
+    const firstEdit = activity.edits[0].eventId;
+    const readsBeforeEdit = activity.reads.filter((read) => read.eventId < firstEdit);
+    if (readsBeforeEdit.length === 0) {
+      withoutRead.push(file);
+      continue;
+    }
+    if (readsBeforeEdit.every((read) => readCoverage(read) === "partial")) partialBeforeEdit.push(file);
+  }
+
+  const records = [];
+  if (partialBeforeEdit.length) {
+    records.push(reviewItem(
+      "read-order:partial-before-edit",
+      `Partial reads before edit (${partialBeforeEdit.length} files)`,
+      `${partialBeforeEdit.length} edited files were only partially read before their first edit.`,
+      `### Partial reads before edit\n\n${partialBeforeEdit.map((file) => `- \`${file}\``).join("\n")}\n\nThis is an observable ordering signal. It does not prove that the agent missed relevant context.`,
+      ["memory", "partial-read", "read-before-edit", "review"],
+    ));
+  }
+  if (withoutRead.length) {
+    records.push(reviewItem(
+      "read-order:edited-without-read",
+      `Edited without prior read (${withoutRead.length} ${withoutRead.length === 1 ? "file" : "files"})`,
+      `${withoutRead.length} edited files had no preceding read operation in the session.`,
+      `### Edited without prior read\n\n${withoutRead.map((file) => `- \`${file}\``).join("\n")}\n\nThis is an observable session signal, not a conclusion about the agent's prior knowledge.`,
+      ["memory", "read-before-edit", "review"],
+    ));
+  }
+  return records;
+}
+
+function buildVerificationRecord(commands, edits, typescriptSession) {
+  if (edits.length === 0) return null;
+  const verification = commands.filter((command) => ["build", "typecheck", "test", "lint"].includes(classifyCommand(command.args.command || "")));
+  if (verification.length === 0) {
+    return reviewItem(
+      "verification:after-final-edit",
+      "Verification after final edit: None observed",
+      "No build, typecheck, test, or lint command was observed after the edits.",
+      "### Verification\n\nNo recognized build, typecheck, test, or lint command was observed in this session.",
+      ["verification", "review", ...(typescriptSession ? ["typescript"] : [])],
+    );
+  }
+  const lastEdit = latestTimestamp(edits);
+  const lastVerification = latestTimestamp(verification);
+  const verifiedAfterEdit = lastVerification && lastEdit && lastVerification >= lastEdit;
+  const state = verifiedAfterEdit ? "Yes" : "No";
+  return reviewItem(
+    "verification:after-final-edit",
+    `Verification after final edit: ${state}`,
+    verifiedAfterEdit ? "A recognized verification command ran after the final edit." : "The final edit occurred after the last recognized verification command.",
+    `### Verification after final edit\n\n- Last edit: ${lastEdit || "unknown"}\n- Last verification command: ${lastVerification || "unknown"}\n- Verification after final edit: **${state}**\n\nRecognized verification includes build, typecheck, test, and lint commands.`,
+    ["verification", "review", ...(typescriptSession ? ["typescript"] : [])],
+  );
+}
+
+function buildErrorRecord(tools) {
+  const errors = tools.filter((tool) => tool.isError || tool.status !== "success");
+  if (errors.length === 0) return null;
+  const lines = errors.slice(0, 20).map((tool) => `- ${tool.name}${tool.args.command ? `: \`${displayCommand(tool.args.command)}\`` : ""}`);
+  return reviewItem(
+    "errors:tool-results",
+    `Errors: ${errors.length}`,
+    `The session contains ${errors.length} tool result error${errors.length === 1 ? "" : "s"}.`,
+    `### Tool result errors\n\n${lines.join("\n")}${errors.length > 20 ? "\n- Additional errors are present in the session export." : ""}`,
+    ["errors", "review"],
+  );
+}
+
+function isTypeScriptSession(tools) {
+  return tools.some((tool) => {
+    const candidate = tool.args.path || tool.args.command || "";
+    return /\.(cts|mts|ts|tsx)\b/i.test(candidate) || /\b(npm|pnpm|yarn|bun|tsc|tsx|ts-node)\b/i.test(candidate);
+  });
+}
+
+function buildTimingRecord(events) {
+  const regular = events
+    .filter((event) => event.type === "regular" && (event.role === "user" || event.role === "assistant"))
+    .sort((left, right) => new Date(eventTime(left)).getTime() - new Date(eventTime(right)).getTime());
+  const users = regular.filter((event) => event.role === "user");
+  if (users.length === 0) return null;
+  const turns = users.map((user, index) => {
+    const start = new Date(eventTime(user)).getTime();
+    const nextUser = users[index + 1];
+    const boundary = nextUser ? new Date(eventTime(nextUser)).getTime() : null;
+    const assistants = regular.filter((event) => {
+      const timestamp = new Date(eventTime(event)).getTime();
+      return event.role === "assistant" && timestamp >= start && (boundary == null || timestamp < boundary);
+    });
+    const end = assistants.length ? new Date(eventTime(assistants[assistants.length - 1])).getTime() : (boundary || start);
+    return Math.max(0, end - start);
+  });
+  const average = turns.reduce((sum, value) => sum + value, 0) / turns.length;
+  const longest = Math.max(...turns);
+  return reviewItem(
+    "timing:turns",
+    `Timing: ${turns.length} turn${turns.length === 1 ? "" : "s"} · avg ${formatDuration(average)} · longest ${formatDuration(longest)}`,
+    `The session contains ${turns.length} user turn${turns.length === 1 ? "" : "s"}; the average elapsed turn was ${formatDuration(average)}.`,
+    `### Turn timing\n\n- Turns: ${turns.length}\n- Average: ${formatDuration(average)}\n- Longest: ${formatDuration(longest)}\n\nTiming is measured from each user message to the last assistant message before the next user message.`,
+    ["timing", "review"],
+  );
+}
+
+function reviewItem(key, title, shortMarkdown, longMarkdown, topics = [], keywords = []) {
+  return {
+    group: "Session activity",
+    key: `${ANALYZER_ID}:${key}`,
+    title,
+    topics: unique(topics),
+    keywords: unique(keywords),
+    short_markdown: shortMarkdown,
+    long_markdown: longMarkdown,
+    markdown: longMarkdown,
+  };
+}
+
+function classifyCommand(command) {
+  const value = command.toLowerCase();
+  if (/(^|[;&|])\s*(npm|pnpm|yarn|bun)\s+(run\s+)?(build|compile)\b/.test(value) || /\b(tsc)\b.*\s(-b|--build)\b/.test(value) || /\b(cargo|go|make)\s+build\b/.test(value)) return "build";
+  if (/(^|[;&|])\s*(npm|pnpm|yarn|bun)\s+(run\s+)?(check|typecheck)\b/.test(value) || /\btsc\b.*(--noEmit|--no-emit|--pretty)\b/.test(value)) return "typecheck";
+  if (/(^|[;&|])\s*(npm|pnpm|yarn|bun)\s+(run\s+)?test\b/.test(value) || /\b(vitest|jest|pytest)\b/.test(value) || /\bnode\s+--test\b/.test(value) || /\b(cargo|go)\s+test\b/.test(value)) return "test";
+  if (/(^|[;&|])\s*(npm|pnpm|yarn|bun)\s+(run\s+)?lint\b/.test(value) || /\b(eslint|biome|prettier)\b/.test(value)) return "lint";
+  if (/\b(node|tsx|ts-node)\b/.test(value) || /\b(npm|pnpm|yarn|bun)\s+(run\s+)?(start|dev)\b/.test(value)) return "runtime";
+  return "";
+}
+
+function displayCommand(command) {
+  const segments = command.split(/&&|\|\||[;|]/).map((segment) => segment.trim()).filter(Boolean);
+  const interesting = segments.find((segment) => classifyCommand(segment));
+  return (interesting || command)
+    .replace(/\s+2>&1\b/g, "")
+    .replace(/\s+2>\s*[^\s]+/g, "")
+    .trim();
+}
+
+function compactCommandList(entries) {
+  const commands = entries.map(([command]) => command);
+  const maxLength = 150;
+  const visible = [];
+  let length = 0;
+  for (const command of commands) {
+    const addition = visible.length === 0 ? command : `, ${command}`;
+    if (length + addition.length > maxLength && visible.length > 0) break;
+    visible.push(command);
+    length += addition.length;
+  }
+  const hidden = commands.length - visible.length;
+  return visible.join(", ") + (hidden > 0 ? `, +${hidden} more` : "");
+}
+
+function readCoverage(read) {
+  if (read.resultText.includes("more lines in file") || read.args.limit != null || Number(read.args.offset || 0) !== 0) return "partial";
+  if (read.resultText.length > 0 && !read.isError && read.status === "success") return "full";
+  return "unknown";
+}
+
+function filePath(value) {
+  if (!value || typeof value !== "string") return "";
+  return path.isAbsolute(value) ? path.normalize(value) : path.normalize(value);
+}
+
+function latestTimestamp(values) {
+  return values.map((value) => value.timestamp || "").filter(Boolean).sort().at(-1) || "";
+}
+
+function eventTime(event) {
+  return event.created_at || event.timestamp || new Date(0).toISOString();
+}
+
+function formatDuration(milliseconds) {
+  const seconds = Math.round(milliseconds / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function capitalize(value) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function runSelfTest() {
+  assert(classifyCommand("cd /repo && npm run build") === "build", "build classification");
+  assert(classifyCommand("npm run check") === "typecheck", "typecheck classification");
+  assert(classifyCommand("npm test") === "test", "test classification");
+  assert(readCoverage({ args: { limit: 100 }, resultText: "", status: "success", isError: false }) === "partial", "bounded read classification");
+  assert(readCoverage({ args: {}, resultText: "[10 more lines in file]", status: "success", isError: false }) === "partial", "marker read classification");
+  assert(displayCommand("cd /repo && npm run build 2>&1 | tail -20") === "npm run build", "command display");
+  process.stdout.write("session-memory self-test passed\n");
+}
+
+function assert(condition, message) {
+  if (!condition) throw new Error(`self-test failed: ${message}`);
+}
+
+main();
