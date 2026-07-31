@@ -20,6 +20,29 @@ Run this from the Pi repository:
   --import
 ```
 
+The builder can be called on every refresh. It asks `gsc` for the cheap current
+session revision, uses a per-session lock, and skips the export/import when the
+revision and builder version have not changed:
+
+```bash
+.gitsense/bin/build-session-memory \
+  --session <pi-session-uuid> \
+  --import
+```
+
+To pass a revision already obtained by `gsc`, use:
+
+```bash
+REVISION="$(gsc pi sessions revision --uuid <pi-session-uuid> | jq -r .revision)"
+.gitsense/bin/build-session-memory \
+  --session <pi-session-uuid> \
+  --revision "$REVISION" \
+  --import
+```
+
+An unchanged invocation returns `status: unchanged`. The processed revision is
+stored beside the session Brain under `$GSC_HOME/data/pi/session-brains/.state`.
+
 The builder exports the complete active session branch with:
 
 ```text
@@ -35,6 +58,10 @@ $GSC_HOME/data/pi/session-brains/memory-<pi-session-uuid>.db
 The import is atomic, so rerunning the builder keeps the Brain current as the
 session grows. Use `--output /tmp/session-memory.json` without `--import` to
 inspect the generated manifest first.
+
+`gsc pi sessions revision` is a fast check based on the synchronized session
+file metadata and counters; it does not walk or export the session message
+tree.
 
 ## Configure the export
 
@@ -83,3 +110,17 @@ The builder currently emits items for:
 
 For TypeScript sessions, recognized command items receive the `typescript`
 topic so they can be filtered separately from repository-generic activity.
+
+## Chat app refresh hook
+
+To have the Pi Chat backend refresh session metadata before each initial load
+and poll, configure the builder path in its environment:
+
+```bash
+export GSC_PI_SESSION_METADATA_BUILDER="$HOME/pi/.gitsense/bin/build-session-memory"
+```
+
+When session metadata is configured, the backend asks `gsc pi sessions
+revision` for the cheap current revision, then invokes the builder once for
+each requested Brain. The builder lock and revision state make unchanged polls
+cheap while still rebuilding after the session log changes.

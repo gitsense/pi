@@ -6,9 +6,12 @@ import os from "node:os";
 import path from "node:path";
 
 const ANALYZER_ID = "session-memory";
-const BRAIN_NAME = "memory";
+const BUILDER_VERSION = "2";
+const DEFAULT_BRAIN_NAME = "memory";
 const FIELD_NAME = "context";
 const SESSION_FILE_PATH = "__gsc_session__";
+const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
+const STALE_LOCK_AGE_MS = 10 * 60 * 1000;
 
 function main() {
   try {
@@ -24,27 +27,63 @@ function main() {
     if (!flags.session) {
       throw new Error("--session is required");
     }
+    const brain = validateBrainName(flags.brain);
 
-    const exportData = exportSession(flags.session, flags.gsc);
-    const records = buildSessionRecords(exportData);
-    const manifest = buildManifest(flags.session, exportData, records);
-    const outputPath = path.resolve(
-      flags.output || path.join(os.tmpdir(), `gsc-pi-${BRAIN_NAME}-${flags.session}.json`),
-    );
-    fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    const revision = flags.revision || getSessionRevision(flags.session, flags.gsc);
+    let releaseLock = null;
+    try {
+      if (flags.import) {
+        const paths = sessionStatePaths(flags.session, brain);
+        releaseLock = acquireLock(paths.lockPath, flags.lockTimeoutMs);
+        if (isCurrent(paths, revision)) {
+          process.stdout.write(`${JSON.stringify({
+            status: "unchanged",
+            session: flags.session,
+            brain,
+            revision,
+          })}\n`);
+          return;
+        }
+      }
 
-    process.stderr.write(`[${ANALYZER_ID}] Session: ${flags.session}\n`);
-    process.stderr.write(`[${ANALYZER_ID}] Generated ${records.length} metadata item(s)\n`);
-    process.stderr.write(`[${ANALYZER_ID}] Manifest: ${outputPath}\n`);
+      const exportData = exportSession(flags.session, flags.gsc);
+      const records = buildSessionRecords(exportData);
+      const manifest = buildManifest(flags.session, exportData, records, brain);
+      const outputPath = path.resolve(
+        flags.output || path.join(os.tmpdir(), `gsc-pi-${brain}-${flags.session}.json`),
+      );
+      fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
 
-    if (!flags.import) {
-      process.stderr.write(`[${ANALYZER_ID}] Review the manifest, then rerun with --import\n`);
-      return;
-    }
+      process.stderr.write(`[${ANALYZER_ID}] Session: ${flags.session}\n`);
+      process.stderr.write(`[${ANALYZER_ID}] Revision: ${revision}\n`);
+      process.stderr.write(`[${ANALYZER_ID}] Generated ${records.length} metadata item(s)\n`);
+      process.stderr.write(`[${ANALYZER_ID}] Manifest: ${outputPath}\n`);
 
-    const result = importSessionBrain(flags.session, outputPath, flags.gsc);
-    if (result.stdout.trim()) {
-      process.stdout.write(result.stdout.trimEnd() + "\n");
+      if (!flags.import) {
+        process.stderr.write(`[${ANALYZER_ID}] Review the manifest, then rerun with --import\n`);
+        return;
+      }
+
+      const result = importSessionBrain(flags.session, outputPath, flags.gsc, brain);
+      writeState(sessionStatePaths(flags.session, brain).statePath, {
+        schema_version: "1.0",
+        builder: ANALYZER_ID,
+        builder_version: BUILDER_VERSION,
+        session: flags.session,
+        brain,
+        revision,
+        processed_at: new Date().toISOString(),
+      });
+      const payload = parseJSON(result.stdout);
+      if (payload) {
+        process.stdout.write(`${JSON.stringify({ ...payload, status: "updated", revision })}\n`);
+      } else if (result.stdout.trim()) {
+        process.stdout.write(result.stdout.trimEnd() + "\n");
+      } else {
+        process.stdout.write(`${JSON.stringify({ status: "updated", session: flags.session, brain, revision })}\n`);
+      }
+    } finally {
+      if (releaseLock) releaseLock();
     }
   } catch (error) {
     process.stderr.write(`[${ANALYZER_ID}] ${error.message}\n`);
@@ -55,9 +94,12 @@ function main() {
 function parseFlags(args) {
   const flags = {
     session: "",
+    brain: DEFAULT_BRAIN_NAME,
+    revision: "",
     output: "",
     gsc: "gsc",
     import: false,
+    lockTimeoutMs: DEFAULT_LOCK_TIMEOUT_MS,
     help: false,
     selfTest: false,
   };
@@ -66,6 +108,8 @@ function parseFlags(args) {
     const arg = args[index];
     switch (arg) {
       case "--session":
+      case "--brain":
+      case "--revision":
       case "--output":
       case "--gsc": {
         const value = args[index + 1];
@@ -73,6 +117,19 @@ function parseFlags(args) {
           throw new Error(`${arg} requires a value`);
         }
         flags[arg.slice(2)] = value;
+        index += 1;
+        break;
+      }
+      case "--lock-timeout-ms": {
+        const value = args[index + 1];
+        if (!value || value.startsWith("--")) {
+          throw new Error(`${arg} requires a value`);
+        }
+        const timeout = Number(value);
+        if (!Number.isInteger(timeout) || timeout < 0 || timeout > 300_000) {
+          throw new Error("--lock-timeout-ms must be an integer from 0 to 300000");
+        }
+        flags.lockTimeoutMs = timeout;
         index += 1;
         break;
       }
@@ -99,11 +156,138 @@ function printHelp() {
   process.stdout.write("  .gitsense/bin/build-session-memory --session <uuid> [flags]\n\n");
   process.stdout.write("Flags:\n");
   process.stdout.write("  --session <uuid>   Pi session UUID\n");
+  process.stdout.write("  --brain <name>     Session Brain name (default memory)\n");
+  process.stdout.write("  --revision <value> Current gsc session revision (skips unchanged builds)\n");
   process.stdout.write("  --output <path>    Manifest path (default: system temp directory)\n");
   process.stdout.write("  --import           Replace the session memory Brain\n");
   process.stdout.write("  --gsc <path>       gsc executable (default: gsc)\n");
+  process.stdout.write("  --lock-timeout-ms  Lock wait timeout (default 30000)\n");
   process.stdout.write("  --self-test        Run deterministic parser checks\n");
   process.stdout.write("  -h, --help         Show this help\n");
+}
+
+function getSessionRevision(session, gsc) {
+  const result = spawnSync(
+    gsc,
+    ["pi", "sessions", "revision", "--uuid", session],
+    { encoding: "utf8", maxBuffer: 2 * 1024 * 1024 },
+  );
+  if (result.error) {
+    throw new Error(`could not run gsc revision: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`gsc revision failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`}`);
+  }
+  const payload = parseJSON(result.stdout);
+  if (!payload || payload.status !== "success" || typeof payload.revision !== "string" || !payload.revision) {
+    throw new Error(payload?.message || "gsc revision returned an invalid response");
+  }
+  return payload.revision;
+}
+
+function validateBrainName(value) {
+  if (typeof value !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value)) {
+    throw new Error("--brain must be a simple Brain name");
+  }
+  return value;
+}
+
+function sessionStatePaths(session, brain) {
+  const gscHome = process.env.GSC_HOME;
+  if (!gscHome) throw new Error("GSC_HOME is required when using --import");
+  const safeSession = String(session).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const sessionBrains = path.join(gscHome, "data", "pi", "session-brains");
+  return {
+    brainPath: path.join(sessionBrains, `${brain}-${safeSession}.db`),
+    statePath: path.join(sessionBrains, ".state", `${brain}-${safeSession}.json`),
+    lockPath: path.join(sessionBrains, ".locks", `${brain}-${safeSession}.lock`),
+  };
+}
+
+function isCurrent(paths, revision) {
+  if (!fs.existsSync(paths.brainPath) || !fs.existsSync(paths.statePath)) return false;
+  const state = readJSON(paths.statePath);
+  return state?.builder === ANALYZER_ID &&
+    state?.builder_version === BUILDER_VERSION &&
+    state?.revision === revision;
+}
+
+function acquireLock(lockPath, timeoutMs = DEFAULT_LOCK_TIMEOUT_MS) {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const started = Date.now();
+  while (true) {
+    try {
+      fs.mkdirSync(lockPath);
+      fs.writeFileSync(path.join(lockPath, "owner.json"), JSON.stringify({
+        pid: process.pid,
+        created_at: new Date().toISOString(),
+      }) + "\n", { mode: 0o600 });
+      return () => fs.rmSync(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (isStaleLock(lockPath)) {
+        fs.rmSync(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        throw new Error(`timed out waiting for session Brain lock: ${lockPath}`);
+      }
+      sleepSync(50);
+    }
+  }
+}
+
+function isStaleLock(lockPath) {
+  let stat;
+  try {
+    stat = fs.statSync(lockPath);
+  } catch {
+    return false;
+  }
+  if (Date.now() - stat.mtimeMs < STALE_LOCK_AGE_MS) return false;
+  try {
+    const owner = readJSON(path.join(lockPath, "owner.json"));
+    if (owner?.pid && isProcessAlive(owner.pid)) return false;
+  } catch {
+    // A stale lock without readable owner information can be reclaimed.
+  }
+  return true;
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function readJSON(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function parseJSON(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function writeState(filePath, state) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporaryPath, filePath);
 }
 
 function exportSession(session, gsc) {
@@ -144,7 +328,7 @@ function exportSession(session, gsc) {
   return data;
 }
 
-function importSessionBrain(session, manifestPath, gsc) {
+function importSessionBrain(session, manifestPath, gsc, brain) {
   const result = spawnSync(
     gsc,
     [
@@ -155,7 +339,7 @@ function importSessionBrain(session, manifestPath, gsc) {
       "--session",
       session,
       "--brain",
-      BRAIN_NAME,
+      brain,
       "--manifest",
       manifestPath,
       "--format",
@@ -172,14 +356,14 @@ function importSessionBrain(session, manifestPath, gsc) {
   return result;
 }
 
-function buildManifest(session, exportData, records) {
+function buildManifest(session, exportData, records, brain) {
   const pi = exportData.chat?.meta?.pi || {};
   return {
     schema_version: "1.0",
     generated_at: new Date().toISOString(),
     manifest: {
-      name: `${BRAIN_NAME}-${session}`,
-      database_name: BRAIN_NAME,
+      name: `${brain}-${session}`,
+      database_name: brain,
       description: "Deterministic session activity and context signals extracted from a Pi session log.",
       tags: ["pi", "session", "typescript", "review"],
     },
