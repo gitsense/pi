@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 const ANALYZER_ID = "session-memory";
-const BUILDER_VERSION = "2";
+const BUILDER_VERSION = "3";
 const DEFAULT_BRAIN_NAME = "memory";
 const FIELD_NAME = "context";
 const SESSION_FILE_PATH = "__gsc_session__";
@@ -334,7 +334,7 @@ function importSessionBrain(session, manifestPath, gsc, brain) {
     [
       "pi",
       "sessions",
-      "brain",
+      "brains",
       "import",
       "--session",
       session,
@@ -425,7 +425,9 @@ function buildSessionRecords(exportData) {
   const events = collectEvents(exportData);
   const tools = events.flatMap((event) => extractTools(event));
   const reads = tools.filter((tool) => tool.name === "read");
-  const fileEdits = tools.filter((tool) => tool.name === "edit" || tool.name === "write");
+  const edits = tools.filter((tool) => tool.name === "edit");
+  const writes = tools.filter((tool) => tool.name === "write");
+  const fileEdits = [...edits, ...writes];
   const commands = tools.filter((tool) => tool.name === "bash");
   const typescriptSession = isTypeScriptSession(tools);
   const records = [];
@@ -436,7 +438,7 @@ function buildSessionRecords(exportData) {
   const readRecord = buildReadCoverageRecord(reads, typescriptSession);
   if (readRecord) records.push(readRecord);
 
-  const orderingRecords = buildReadOrderingRecords(reads, fileEdits);
+  const orderingRecords = buildReadOrderingRecords(reads, edits);
   records.push(...orderingRecords);
 
   const verificationRecord = buildVerificationRecord(commands, fileEdits, typescriptSession);

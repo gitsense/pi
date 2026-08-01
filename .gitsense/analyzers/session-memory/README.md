@@ -12,6 +12,38 @@ families, verification order, errors, and elapsed turns.
 
 ## Build the session Brain
 
+When this analyzer is installed in the session repository, the Chat backend
+automatically runs the standard `.gitsense/bin/build-session-memory` builder
+when a configured session Brain is missing or stale. Users normally only need
+to configure `session::<brain>::<field>` in Chat.
+
+If the analyzer is installed in a different repository, register the builder
+once so Chat can discover it for sessions from any repository:
+
+```bash
+gsc pi sessions brains register \
+  --brain memory \
+  --builder "$HOME/pi/.gitsense/bin/build-session-memory"
+```
+
+This is a one-time analyzer registration, not a per-session bootstrap.
+
+To remove the registration later without deleting existing session Brains:
+
+```bash
+gsc pi sessions brains unregister --brain memory
+```
+
+List registered session Brain builders with:
+
+```bash
+gsc pi sessions brains list
+```
+
+Run the builder manually when developing or troubleshooting the analyzer. The
+initial `--import` creates the session Brain and records its builder descriptor;
+after that, the backend can discover and refresh the builder automatically.
+
 Run this from the Pi repository:
 
 ```bash
@@ -113,11 +145,12 @@ The title is the compact signal shown in the metadata list. Topics provide
 stable filters. `short_markdown` is used for compact rendering, while
 `long_markdown` contains the command, file, timestamp, and evidence details.
 
-The manifest records the Brain scope and the builder path. After the first
-import, `gsc pi sessions brains show --session <uuid> --brain memory --format
-json` can discover the builder without a per-analyzer environment variable.
-The environment variable below remains a compatibility fallback for existing
-Brains that have not yet been imported with a builder descriptor.
+The manifest records the Brain scope and builder path. The registration above
+stores the same builder contract globally under `$GSC_HOME/data/pi`, so
+`gsc pi sessions brains show --session <uuid> --brain memory --format json`
+can discover it before the first session import. A session-specific descriptor
+created by `--import` takes precedence. The environment variable below remains
+a compatibility fallback for older backends.
 
 The builder currently emits items for:
 
