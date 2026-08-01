@@ -72,11 +72,26 @@ gsc pi sessions export \
   --format gsc-json \
   --uuid <pi-session-uuid> \
   --include-metadata-index \
-  --session-metadata 'memory::context'
+  --session-metadata 'session::memory::context'
 ```
 
 Session metadata appears as one `Session` occurrence in the metadata index. It
-is intentionally not copied onto every file operation.
+is intentionally not copied onto every file operation. The canonical selector
+is `session::<brain>::<field>`; for example:
+
+```bash
+gsc pi sessions export \
+  --format gsc-json \
+  --uuid <pi-session-uuid> \
+  --include-metadata-index \
+  --session-metadata 'session::memory::context'
+```
+
+The logical Brain name (`memory`) is combined with the session UUID by `gsc`:
+
+```text
+$GSC_HOME/data/pi/session-brains/memory-<pi-session-uuid>.db
+```
 
 ## Metadata items
 
@@ -98,6 +113,12 @@ The title is the compact signal shown in the metadata list. Topics provide
 stable filters. `short_markdown` is used for compact rendering, while
 `long_markdown` contains the command, file, timestamp, and evidence details.
 
+The manifest records the Brain scope and the builder path. After the first
+import, `gsc pi sessions brains show --session <uuid> --brain memory --format
+json` can discover the builder without a per-analyzer environment variable.
+The environment variable below remains a compatibility fallback for existing
+Brains that have not yet been imported with a builder descriptor.
+
 The builder currently emits items for:
 
 * build, typecheck, test, lint, and runtime commands;
@@ -113,8 +134,8 @@ topic so they can be filtered separately from repository-generic activity.
 
 ## Chat app refresh hook
 
-To have the Pi Chat backend refresh session metadata before each initial load
-and poll, configure the builder path in its environment:
+To have older Pi Chat backends refresh session metadata before each initial
+load and poll, configure the builder path in its environment:
 
 ```bash
 export GSC_PI_SESSION_METADATA_BUILDER="$HOME/pi/.gitsense/bin/build-session-memory"
