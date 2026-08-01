@@ -6,14 +6,27 @@ import os from "node:os";
 import path from "node:path";
 
 const ANALYZER_ID = "session-activity-review";
-const BUILDER_VERSION = "5";
+const BUILDER_VERSION = "9";
 const DEFAULT_BRAIN_NAME = "activity-review";
 const FIELD_NAME = "signals";
+const FIELD_REPORT = "report";
+const FIELD_HANDOFF = "handoff";
 const FIELD_REVIEW_CONTEXT = {
   label: "Review signals",
   item_singular: "review signal",
   item_plural: "review signals",
 };
+const FIELD_REPORT_CONTEXT = {
+  label: "Session report",
+  item_singular: "session report",
+  item_plural: "session reports",
+};
+const FIELD_HANDOFF_CONTEXT = {
+  label: "Pattern review handoff",
+  item_singular: "pattern review handoff",
+  item_plural: "pattern review handoffs",
+};
+const HANDOFF_MAX_CHARS = 40_000;
 const SESSION_FILE_PATH = "__gsc_session__";
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 const STALE_LOCK_AGE_MS = 10 * 60 * 1000;
@@ -52,8 +65,8 @@ function main() {
       }
 
       const exportData = exportSession(flags.session, flags.gsc);
-      const records = buildSessionRecords(exportData);
-      const manifest = buildManifest(flags.session, exportData, records, brain);
+      const analysis = buildSessionAnalysis(exportData);
+      const manifest = buildManifest(flags.session, exportData, analysis.records, analysis.report, analysis.handoff, brain);
       const outputPath = path.resolve(
         flags.output || path.join(os.tmpdir(), `gsc-pi-${brain}-${flags.session}.json`),
       );
@@ -61,7 +74,7 @@ function main() {
 
       process.stderr.write(`[${ANALYZER_ID}] Session: ${flags.session}\n`);
       process.stderr.write(`[${ANALYZER_ID}] Revision: ${revision}\n`);
-      process.stderr.write(`[${ANALYZER_ID}] Generated ${records.length} metadata item(s)\n`);
+      process.stderr.write(`[${ANALYZER_ID}] Generated ${analysis.records.length} metadata item(s)\n`);
       process.stderr.write(`[${ANALYZER_ID}] Manifest: ${outputPath}\n`);
 
       if (!flags.import) {
@@ -361,8 +374,10 @@ function importSessionBrain(session, manifestPath, gsc, brain) {
   return result;
 }
 
-function buildManifest(session, exportData, records, brain) {
+function buildManifest(session, exportData, records, report, handoff, brain) {
   validateFieldDescriptor(FIELD_NAME, FIELD_REVIEW_CONTEXT);
+  validateFieldDescriptor(FIELD_REPORT, FIELD_REPORT_CONTEXT);
+  validateFieldDescriptor(FIELD_HANDOFF, FIELD_HANDOFF_CONTEXT);
   const pi = exportData.chat?.meta?.pi || {};
   return {
     schema_version: "1.0",
@@ -406,6 +421,36 @@ function buildManifest(session, exportData, records, brain) {
         description: "Structured review signals derived from observable Pi session activity.",
         review_context: FIELD_REVIEW_CONTEXT,
       },
+      {
+        ref: "F1",
+        analyzer_ref: "A0",
+        name: FIELD_REPORT,
+        display_name: "Session activity report",
+        type: "array",
+        description: "One Markdown report generated from observable Pi session activity.",
+        review_context: FIELD_REPORT_CONTEXT,
+        presentation: {
+          kind: "report",
+          format: "markdown",
+          default: true,
+          drilldown_field: FIELD_NAME,
+        },
+      },
+      {
+        ref: "F2",
+        analyzer_ref: "A0",
+        name: FIELD_HANDOFF,
+        display_name: "Pattern review handoff",
+        type: "array",
+        description: "A builder-defined Markdown package for asking another AI to review observable session patterns.",
+        review_context: FIELD_HANDOFF_CONTEXT,
+        presentation: {
+          kind: "handoff",
+          format: "markdown",
+          copyable: true,
+          copy_label: "Copy handoff",
+        },
+      },
     ],
     data: [
       {
@@ -414,7 +459,7 @@ function buildManifest(session, exportData, records, brain) {
         file_path: SESSION_FILE_PATH,
         language: "Session",
         chat_id: 1,
-        fields: { F0: records },
+        fields: { F0: records, F1: [report], F2: [handoff] },
       },
     ],
   };
@@ -434,7 +479,7 @@ function getBuilderPath() {
   }
 }
 
-function buildSessionRecords(exportData) {
+function buildSessionAnalysis(exportData) {
   const events = collectEvents(exportData);
   const tools = events.flatMap((event) => extractTools(event));
   const reads = tools.filter((tool) => tool.name === "read");
@@ -463,7 +508,296 @@ function buildSessionRecords(exportData) {
   const timingRecord = buildTimingRecord(events);
   if (timingRecord) records.push(timingRecord);
 
-  return records.sort((left, right) => left.key.localeCompare(right.key));
+  const sortedRecords = records.sort((left, right) => left.key.localeCompare(right.key));
+  const reportMarkdown = buildSessionReport({ events, tools, reads, edits, writes, commands });
+  const handoffMarkdown = buildSessionHandoff({ events, tools, reads, edits, writes, commands, records: sortedRecords });
+  return {
+    records: sortedRecords,
+    report: buildReportItem(reportMarkdown),
+    handoff: buildHandoffItem(handoffMarkdown),
+  };
+}
+
+function buildReportItem(markdown) {
+  const summary = markdown.split("\n").find((line) => line.includes("conversation message")) || "Session activity report";
+  return {
+    group: "Session report",
+    key: `${ANALYZER_ID}:report`,
+    title: "Session activity report",
+    topics: ["session", "activity", "report"],
+    short_markdown: summary,
+    long_markdown: markdown,
+    markdown,
+  };
+}
+
+function buildHandoffItem(markdown) {
+  return {
+    group: "Session handoff",
+    key: `${ANALYZER_ID}:handoff`,
+    title: "Pattern review handoff",
+    topics: ["session", "activity", "handoff", "review"],
+    markdown,
+  };
+}
+
+function buildSessionReport({ events, tools, reads, edits, writes, commands }) {
+  const conversation = getConversationMessages(events);
+  const users = conversation.filter((event) => event.role === "user");
+  const assistants = conversation.filter((event) => event.role === "assistant");
+  const fileActivity = [...reads, ...edits, ...writes];
+  const files = unique(fileActivity.map((tool) => filePath(tool.args.path)));
+  const errors = tools.filter((tool) => tool.isError || tool.status !== "success");
+  const turnDurations = getTurnDurations(events);
+  const averageTurn = turnDurations.length
+    ? turnDurations.reduce((sum, value) => sum + value, 0) / turnDurations.length
+    : 0;
+  const longestTurn = turnDurations.length ? Math.max(...turnDurations) : 0;
+  const report = [
+    "# Session activity",
+    "",
+    `${conversation.length} conversation message${conversation.length === 1 ? "" : "s"} · ${users.length} turn${users.length === 1 ? "" : "s"} · ${tools.length} tool call${tools.length === 1 ? "" : "s"} · ${files.length} unique file${files.length === 1 ? "" : "s"} in activity`,
+    "",
+    "## Observed elapsed activity",
+    "",
+  ];
+
+  appendObservedActivity(report, "Reads", reads, "read");
+  appendObservedActivity(report, "Edits and writes", [...edits, ...writes], "file change");
+  appendObservedActivity(report, "Bash commands", commands, "command");
+  report.push(
+    "",
+    "Observed elapsed time includes model processing and pauses between events. It is not tool execution time.",
+    "",
+    "## Conversation",
+    "",
+    `- User messages: ${users.length}`,
+    `- Assistant messages: ${assistants.length}`,
+    `- Average elapsed turn: ${formatDuration(averageTurn)}`,
+    `- Longest elapsed turn: ${formatDuration(longestTurn)}`,
+  );
+
+  const commandGroups = summarizeCommandGroups(commands);
+  if (commandGroups.length) {
+    report.push("", "## Commands", "");
+    for (const group of commandGroups) {
+      report.push(`- ${capitalize(group.category)}: ${group.count} command${group.count === 1 ? "" : "s"}${group.errors ? ` · ${group.errors} reported error${group.errors === 1 ? "" : "s"}` : ""}`);
+    }
+  }
+
+  if (errors.length) {
+    report.push(
+      "",
+      "## Tool results",
+      "",
+      `- ${errors.length} non-success tool result${errors.length === 1 ? "" : "s"} recorded.`,
+    );
+  }
+
+  return `${report.join("\n").trim()}\n`;
+}
+
+function buildSessionHandoff({ events, tools, reads, edits, writes, commands, records }) {
+  const conversation = getConversationMessages(events);
+  const users = conversation.filter((event) => event.role === "user");
+  const fileActivity = [...reads, ...edits, ...writes];
+  const files = unique(fileActivity.map((tool) => filePath(tool.args.path)));
+  const errors = tools.filter((tool) => tool.isError || tool.status !== "success");
+  const verification = commands.filter((command) => ["build", "typecheck", "test", "lint"].includes(classifyCommand(command.args.command || "")));
+  const successfulVerification = verification.filter((command) => !command.isError && command.status === "success");
+  const repeatedCommands = summarizeRepeatedCommands(commands);
+  const repeatedFailures = repeatedCommands.filter((group) => group.items.length >= 3 && group.items.every((item) => item.isError || item.status !== "success"));
+  const phases = inferSessionPhases({ reads, fileActivity, commands, errors });
+  const turnDurations = getTurnDurations(events);
+  const report = [
+    "# Pattern review handoff",
+    "",
+    "This handoff summarizes observable session behavior. It is for reviewing the work pattern, not for deciding whether the code is correct.",
+    "",
+    "## Task",
+    "",
+    `- ${truncateText(users[users.length - 1]?.message || "No user request was available.", 900)}`,
+    "",
+    "## Scale",
+    "",
+    `- ${conversation.length} conversation messages · ${users.length} turns · ${tools.length} tool calls · ${files.length} unique files in activity`,
+    `- Average elapsed turn: ${formatDuration(turnDurations.length ? turnDurations.reduce((sum, value) => sum + value, 0) / turnDurations.length : 0)}`,
+    `- Longest elapsed turn: ${formatDuration(turnDurations.length ? Math.max(...turnDurations) : 0)}`,
+    "",
+    "## Observed pattern",
+    "",
+    `- Phase sequence: ${phases.join(" → ")}`,
+    `- File activity: ${reads.length} reads · ${edits.length} edits · ${writes.length} writes`,
+    `- Verification commands: ${verification.length} observed · ${successfulVerification.length} reported success`,
+    `- Tool result errors: ${errors.length}`,
+    "",
+    "## Progress signals",
+    "",
+  ];
+
+  if (successfulVerification.length) {
+    report.push("- Verification commands eventually reported success.");
+  } else if (verification.length) {
+    report.push("- Verification commands were observed, but none reported success.");
+  } else {
+    report.push("- No recognized build, typecheck, test, or lint command was observed.");
+  }
+  if (fileActivity.length) report.push(`- File activity continued across ${files.length} unique file${files.length === 1 ? "" : "s"}.`);
+  if (repeatedCommands.length) report.push(`- ${repeatedCommands.length} command pattern${repeatedCommands.length === 1 ? " was" : "s were"} repeated at least twice.`);
+  if (!repeatedCommands.length) report.push("- No command pattern was repeated more than once.");
+
+  report.push("", "## Anomalies", "");
+  if (errors.length) {
+    report.push(`- ${errors.length} non-success tool result${errors.length === 1 ? "" : "s"} were recorded.`);
+  } else {
+    report.push("- No non-success tool results were recorded.");
+  }
+  const partialReads = reads.filter((read) => readCoverage(read) === "partial");
+  if (partialReads.length) report.push(`- ${partialReads.length} partial read${partialReads.length === 1 ? "" : "s"} were observed across ${unique(partialReads.map((read) => filePath(read.args.path))).length} files.`);
+  if (repeatedFailures.length) {
+    report.push(`- ${repeatedFailures.length} possible repeated-failure cycle${repeatedFailures.length === 1 ? "" : "s"} need attention.`);
+  } else {
+    report.push("- No repeated command and error cycle with three or more failed attempts and no intervening file progress was detected.");
+  }
+
+  const evidence = buildCommandEvidence(commands, repeatedCommands, 18);
+  if (evidence.length) report.push("", "## Command evidence", "", ...evidence);
+
+  report.push(
+    "",
+    "## Review question",
+    "",
+    "Review these observable patterns and identify anything unusual, unresolved, or worth checking. Distinguish recovered errors from ongoing failure loops. Do not assume the agent missed context, and do not treat this handoff as proof of code correctness.",
+    "",
+    "Observed elapsed time includes model processing and pauses between events. Tool status is reported as exported by the session; a numeric exit code may not be available.",
+  );
+
+  return limitHandoff(`${report.join("\n").trim()}\n`);
+}
+
+function inferSessionPhases({ reads, fileActivity, commands, errors }) {
+  const phases = [];
+  if (reads.length) phases.push("explore");
+  if (fileActivity.some((tool) => tool.name === "edit" || tool.name === "write")) phases.push("implement");
+  if (errors.length) phases.push("recover");
+  if (commands.some((command) => ["build", "typecheck", "test", "lint"].includes(classifyCommand(command.args.command || "")))) phases.push("verify");
+  return unique(phases.length ? phases : ["observe"]);
+}
+
+function summarizeRepeatedCommands(commands) {
+  const groups = new Map();
+  for (const command of commands) {
+    const raw = String(command.args.command || "").trim();
+    if (!raw) continue;
+    const fingerprint = raw.toLowerCase().replace(/\s+/g, " ");
+    const group = groups.get(fingerprint) || { command: raw, items: [] };
+    group.items.push(command);
+    groups.set(fingerprint, group);
+  }
+  return [...groups.values()]
+    .filter((group) => group.items.length >= 2)
+    .sort((left, right) => right.items.length - left.items.length || left.command.localeCompare(right.command));
+}
+
+function buildCommandEvidence(commands, repeatedCommands, limit) {
+  const repeated = new Set(repeatedCommands.map((group) => group.command.toLowerCase().replace(/\s+/g, " ")));
+  const selected = commands.filter((command) => {
+    const raw = String(command.args.command || "").trim();
+    const fingerprint = raw.toLowerCase().replace(/\s+/g, " ");
+    return command.isError || command.status !== "success" || repeated.has(fingerprint);
+  });
+  const seen = new Set();
+  const evidence = [];
+  for (const command of selected) {
+    const raw = String(command.args.command || "").trim();
+    const fingerprint = raw.toLowerCase().replace(/\s+/g, " ");
+    const identity = `${fingerprint}\x00${command.status}\x00${command.isError}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    const matching = selected.filter((item) => {
+      const value = String(item.args.command || "").trim().toLowerCase().replace(/\s+/g, " ");
+      return value === fingerprint;
+    });
+    const statuses = matching.map((item) => formatToolStatus(item)).join(" → ");
+    const output = matching.map((item) => getOutputExcerpt(item.resultText)).find(Boolean);
+    evidence.push(`### \`${truncateText(raw, 320)}\``, `- Attempts: ${matching.length}`, `- Statuses: ${statuses || "unknown"}`);
+    if (output) evidence.push(`- Output excerpt: ${output}`);
+    evidence.push("");
+    if (evidence.filter((line) => line.startsWith("### ")).length >= limit) break;
+  }
+  return evidence;
+}
+
+function formatToolStatus(tool) {
+  if (tool.exitCode !== null && tool.exitCode !== undefined) return `exit ${tool.exitCode}`;
+  if (tool.isError) return "error";
+  return tool.status || "unknown";
+}
+
+function getOutputExcerpt(value, maxLength = 260) {
+  if (!value || typeof value !== "string") return "";
+  const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const relevant = lines.filter((line) => /error|fail|exception|cannot|no such|passed|success/i.test(line));
+  const selected = (relevant.length ? relevant.slice(0, 2) : lines.slice(-2)).join(" / ");
+  return truncateText(selected.replace(/`/g, "'"), maxLength);
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function limitHandoff(markdown) {
+  if (markdown.length <= HANDOFF_MAX_CHARS) return markdown;
+  return `${markdown.slice(0, HANDOFF_MAX_CHARS - 80).trimEnd()}\n\n[Additional routine evidence omitted by the builder to keep this handoff bounded.]\n`;
+}
+
+function appendObservedActivity(lines, label, values, singular) {
+  if (values.length === 0) return;
+  const elapsed = observedElapsed(values);
+  lines.push(`- ${label}: ${formatDuration(elapsed)} observed across ${values.length} ${singular}${values.length === 1 ? "" : "s"}`);
+}
+
+function getConversationMessages(events) {
+  const regular = events
+    .filter((event) => event.type === "regular" && (event.role === "user" || event.role === "assistant"))
+    .sort((left, right) => new Date(eventTime(left)).getTime() - new Date(eventTime(right)).getTime());
+  const users = regular.filter((event) => event.role === "user" && String(event.message || "").trim());
+  const messages = [];
+  for (let index = 0; index < users.length; index += 1) {
+    const user = users[index];
+    const start = new Date(eventTime(user)).getTime();
+    const nextUser = users[index + 1];
+    const boundary = nextUser ? new Date(eventTime(nextUser)).getTime() : null;
+    const assistants = regular.filter((event) => {
+      const timestamp = new Date(eventTime(event)).getTime();
+      return event.role === "assistant" && String(event.message || "").trim() && timestamp >= start && (boundary == null || timestamp < boundary);
+    });
+    messages.push(user);
+    if (assistants.length) messages.push(assistants[assistants.length - 1]);
+  }
+  return messages;
+}
+
+function observedElapsed(values) {
+  const timestamps = values
+    .map((value) => Date.parse(value.timestamp || ""))
+    .filter((value) => Number.isFinite(value));
+  if (timestamps.length < 2) return 0;
+  return Math.max(...timestamps) - Math.min(...timestamps);
+}
+
+function summarizeCommandGroups(commands) {
+  const groups = new Map();
+  for (const command of commands) {
+    const category = classifyCommand(command.args.command || "") || "other";
+    const group = groups.get(category) || { category, count: 0, errors: 0 };
+    group.count += 1;
+    if (command.isError || command.status !== "success") group.errors += 1;
+    groups.set(category, group);
+  }
+  return [...groups.values()].sort((left, right) => left.category.localeCompare(right.category));
 }
 
 function collectEvents(exportData) {
@@ -503,6 +837,7 @@ function extractTools(event) {
     args: tool.arguments || {},
     status: tool.status || "unknown",
     isError: tool.is_error === true,
+    exitCode: tool.exit_code ?? tool.exitCode ?? null,
     resultText: tool.result_text || "",
     eventId: event.id,
     entryId: event.entry_id || "",
@@ -663,12 +998,25 @@ function isTypeScriptSession(tools) {
 }
 
 function buildTimingRecord(events) {
+  const turns = getTurnDurations(events);
+  if (turns.length === 0) return null;
+  const average = turns.reduce((sum, value) => sum + value, 0) / turns.length;
+  const longest = Math.max(...turns);
+  return reviewItem(
+    "timing:turns",
+    `Elapsed: ${turns.length} turn${turns.length === 1 ? "" : "s"} · avg ${formatDuration(average)} · longest ${formatDuration(longest)}`,
+    `The session contains ${turns.length} user turn${turns.length === 1 ? "" : "s"}; the average observed elapsed turn was ${formatDuration(average)}.`,
+    `### Observed elapsed turn time\n\n- Turns: ${turns.length}\n- Average: ${formatDuration(average)}\n- Longest: ${formatDuration(longest)}\n\nObserved elapsed time is measured from each user message to the last assistant message before the next user message. It includes model processing and pauses between events, not just tool execution.`,
+    ["timing", "elapsed", "review"],
+  );
+}
+
+function getTurnDurations(events) {
   const regular = events
     .filter((event) => event.type === "regular" && (event.role === "user" || event.role === "assistant"))
     .sort((left, right) => new Date(eventTime(left)).getTime() - new Date(eventTime(right)).getTime());
   const users = regular.filter((event) => event.role === "user");
-  if (users.length === 0) return null;
-  const turns = users.map((user, index) => {
+  return users.map((user, index) => {
     const start = new Date(eventTime(user)).getTime();
     const nextUser = users[index + 1];
     const boundary = nextUser ? new Date(eventTime(nextUser)).getTime() : null;
@@ -679,15 +1027,6 @@ function buildTimingRecord(events) {
     const end = assistants.length ? new Date(eventTime(assistants[assistants.length - 1])).getTime() : (boundary || start);
     return Math.max(0, end - start);
   });
-  const average = turns.reduce((sum, value) => sum + value, 0) / turns.length;
-  const longest = Math.max(...turns);
-  return reviewItem(
-    "timing:turns",
-    `Timing: ${turns.length} turn${turns.length === 1 ? "" : "s"} · avg ${formatDuration(average)} · longest ${formatDuration(longest)}`,
-    `The session contains ${turns.length} user turn${turns.length === 1 ? "" : "s"}; the average elapsed turn was ${formatDuration(average)}.`,
-    `### Turn timing\n\n- Turns: ${turns.length}\n- Average: ${formatDuration(average)}\n- Longest: ${formatDuration(longest)}\n\nTiming is measured from each user message to the last assistant message before the next user message.`,
-    ["timing", "review"],
-  );
 }
 
 function reviewItem(key, title, shortMarkdown, longMarkdown, topics = [], keywords = []) {
@@ -776,7 +1115,20 @@ function capitalize(value) {
 
 function runSelfTest() {
   validateFieldDescriptor(FIELD_NAME, FIELD_REVIEW_CONTEXT);
+  validateFieldDescriptor(FIELD_REPORT, FIELD_REPORT_CONTEXT);
   assert(FIELD_REVIEW_CONTEXT.item_plural === "review signals", "session field descriptor");
+  const sampleEvents = [
+    { type: "regular", role: "user", message: "first", created_at: "2026-01-01T00:00:00.000Z" },
+    { type: "regular", role: "assistant", message: "", created_at: "2026-01-01T00:00:01.000Z" },
+    { type: "regular", role: "assistant", message: "first response", created_at: "2026-01-01T00:00:02.000Z" },
+    { type: "regular", role: "user", message: "second", created_at: "2026-01-01T00:01:00.000Z" },
+    { type: "regular", role: "assistant", message: "second response", created_at: "2026-01-01T00:01:03.000Z" },
+  ];
+  assert(getConversationMessages(sampleEvents).length === 4, "conversation message classifier");
+  assert(buildSessionReport({ events: sampleEvents, tools: [], reads: [], edits: [], writes: [], commands: [] }).includes("4 conversation messages"), "report conversation count");
+  const sampleHandoff = buildHandoffItem(buildSessionHandoff({ events: sampleEvents, tools: [], reads: [], edits: [], writes: [], commands: [], records: [] }));
+  assert(typeof sampleHandoff.markdown === "string" && !Object.hasOwn(sampleHandoff, "short_markdown"), "handoff markdown contract");
+  assert(sampleHandoff.markdown.length <= HANDOFF_MAX_CHARS, "handoff size bound");
   assert(classifyCommand("cd /repo && npm run build") === "build", "build classification");
   assert(classifyCommand("npm run check") === "typecheck", "typecheck classification");
   assert(classifyCommand("npm test") === "test", "test classification");

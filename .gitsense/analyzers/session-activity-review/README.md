@@ -6,6 +6,12 @@ activity in a Pi session log. It is designed to answer two questions:
 * What did the agent do?
 * What observable activity should be verified before reviewing the code?
 
+The Brain exposes three views of the same session. `report` is a compact
+Markdown overview for the default view. `signals` is the structured detail
+view for filtering and drilling into commands, reads, verification, and other
+session activity. `handoff` is a builder-defined Markdown package that can be
+copied to another AI for a pattern review.
+
 The builder does not make an LLM call and does not claim that an agent missed
 an instruction or retained particular knowledge. It reports bounded reads,
 command families, verification order, errors, and elapsed turns.
@@ -99,7 +105,9 @@ gsc pi sessions export \
   --format gsc-json \
   --uuid <pi-session-uuid> \
   --include-metadata-index \
-  --session-metadata 'session::activity-review::signals'
+  --session-metadata 'session::activity-review::report' \
+  --session-metadata 'session::activity-review::signals' \
+  --session-metadata 'session::activity-review::handoff'
 ```
 
 Session metadata appears as one `Session` occurrence in the metadata index. It
@@ -111,13 +119,108 @@ gsc pi sessions export \
   --format gsc-json \
   --uuid <pi-session-uuid> \
   --include-metadata-index \
-  --session-metadata 'session::activity-review::signals'
+  --session-metadata 'session::activity-review::report' \
+  --session-metadata 'session::activity-review::signals' \
+  --session-metadata 'session::activity-review::handoff'
 ```
 
 The logical Brain name (`activity-review`) is combined with the session UUID by `gsc`:
 
 ```text
 $GSC_HOME/data/pi/session-brains/activity-review-<pi-session-uuid>.db
+```
+
+## Session report
+
+The `report` field contains one session-level report item. Its Markdown is
+intentionally factual and compact so a reviewer can orient themselves before
+opening the structured details. It includes conversation counts, tool-call and
+file counts, command categories, and observed elapsed activity such as:
+
+```markdown
+# Session activity
+
+4 conversation messages · 2 turns · 155 tool calls · 36 files referenced
+
+## Observed elapsed activity
+
+- Reads: 6m observed across 33 reads
+- Edits and writes: 4m observed across 12 file changes
+- Bash commands: 11m observed across 46 commands
+
+Observed elapsed time includes model processing and pauses between events. It
+is not tool execution time.
+```
+
+The report does not declare that a session is ready for review. It gives the
+reviewer enough context to decide whether to inspect the detailed signals or
+go directly to the changed code.
+
+The report field is defined as:
+
+```json
+{
+  "name": "report",
+  "display_name": "Session activity report",
+  "type": "array",
+  "review_context": {
+    "label": "Session report",
+    "item_singular": "session report",
+    "item_plural": "session reports"
+  },
+  "presentation": {
+    "kind": "report",
+    "format": "markdown",
+    "default": true,
+    "drilldown_field": "signals"
+  }
+}
+```
+
+## Pattern review handoff
+
+The `handoff` field is one structured item whose `markdown` value is owned by
+the builder. The builder decides which evidence and reference material to
+include. This analyzer includes the task, session scale, phase sequence,
+progress signals, anomalies, repeated command patterns, tool statuses, and
+short output excerpts for commands that failed or were repeated.
+
+The builder keeps the handoff bounded to approximately 10,000 tokens. Routine
+successful commands are summarized, while suspicious commands retain their
+arguments and useful output excerpts. The handoff asks another AI to review
+observable session patterns, not to determine whether the code is correct.
+
+The field is defined as:
+
+```json
+{
+  "name": "handoff",
+  "display_name": "Pattern review handoff",
+  "type": "array",
+  "review_context": {
+    "label": "Pattern review handoff",
+    "item_singular": "pattern review handoff",
+    "item_plural": "pattern review handoffs"
+  },
+  "presentation": {
+    "kind": "handoff",
+    "format": "markdown",
+    "copyable": true,
+    "copy_label": "Copy handoff"
+  }
+}
+```
+
+The item uses one canonical content property. It does not use
+`short_markdown` or `long_markdown`:
+
+```json
+{
+  "group": "Session handoff",
+  "key": "session-activity-review:handoff",
+  "title": "Pattern review handoff",
+  "markdown": "# Pattern review handoff\n..."
+}
 ```
 
 ## Review signals
@@ -167,7 +270,7 @@ can discover it before the first session import. A session-specific descriptor
 created by `--import` takes precedence. The environment variable below remains
 a compatibility fallback for older backends.
 
-The builder currently emits items for:
+The builder currently emits report data and signal items for:
 
 * build, typecheck, test, lint, and runtime commands;
 * partial read coverage;
@@ -175,7 +278,7 @@ The builder currently emits items for:
 * edited files with no preceding read;
 * verification after the final edit;
 * tool-result errors; and
-* average and longest elapsed turn time.
+* average and longest observed elapsed turn time.
 
 For TypeScript sessions, recognized command items receive the `typescript`
 topic so they can be filtered separately from other session activity.
