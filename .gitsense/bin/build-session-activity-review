@@ -5,10 +5,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const ANALYZER_ID = "session-memory";
-const BUILDER_VERSION = "3";
-const DEFAULT_BRAIN_NAME = "memory";
-const FIELD_NAME = "context";
+const ANALYZER_ID = "session-activity-review";
+const BUILDER_VERSION = "5";
+const DEFAULT_BRAIN_NAME = "activity-review";
+const FIELD_NAME = "signals";
+const FIELD_REVIEW_CONTEXT = {
+  label: "Review signals",
+  item_singular: "review signal",
+  item_plural: "review signals",
+};
 const SESSION_FILE_PATH = "__gsc_session__";
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 const STALE_LOCK_AGE_MS = 10 * 60 * 1000;
@@ -153,13 +158,13 @@ function parseFlags(args) {
 function printHelp() {
   process.stdout.write("Build deterministic session metadata from a Pi session export.\n\n");
   process.stdout.write("Usage:\n");
-  process.stdout.write("  .gitsense/bin/build-session-memory --session <uuid> [flags]\n\n");
+  process.stdout.write("  .gitsense/bin/build-session-activity-review --session <uuid> [flags]\n\n");
   process.stdout.write("Flags:\n");
   process.stdout.write("  --session <uuid>   Pi session UUID\n");
-  process.stdout.write("  --brain <name>     Session Brain name (default memory)\n");
+  process.stdout.write("  --brain <name>     Session Brain name (default activity-review)\n");
   process.stdout.write("  --revision <value> Current gsc session revision (skips unchanged builds)\n");
   process.stdout.write("  --output <path>    Manifest path (default: system temp directory)\n");
-  process.stdout.write("  --import           Replace the session memory Brain\n");
+  process.stdout.write("  --import           Replace the session activity-review Brain\n");
   process.stdout.write("  --gsc <path>       gsc executable (default: gsc)\n");
   process.stdout.write("  --lock-timeout-ms  Lock wait timeout (default 30000)\n");
   process.stdout.write("  --self-test        Run deterministic parser checks\n");
@@ -357,6 +362,7 @@ function importSessionBrain(session, manifestPath, gsc, brain) {
 }
 
 function buildManifest(session, exportData, records, brain) {
+  validateFieldDescriptor(FIELD_NAME, FIELD_REVIEW_CONTEXT);
   const pi = exportData.chat?.meta?.pi || {};
   return {
     schema_version: "1.0",
@@ -364,8 +370,8 @@ function buildManifest(session, exportData, records, brain) {
     manifest: {
       name: `${brain}-${session}`,
       database_name: brain,
-      description: "Deterministic session activity and context signals extracted from a Pi session log.",
-      tags: ["pi", "session", "typescript", "review"],
+      description: "Deterministic review signals extracted from observable Pi session activity.",
+      tags: ["pi", "session", "activity", "review", "deterministic"],
       scope: "session",
       builder: getBuilderPath(),
     },
@@ -386,8 +392,8 @@ function buildManifest(session, exportData, records, brain) {
         ref: "A0",
         id: ANALYZER_ID,
         name: ANALYZER_ID,
-        description: "Extracts deterministic review signals from a Pi session export.",
-        version: "1.0",
+        description: "Extracts deterministic review signals from observable Pi session activity.",
+        version: "2.0.0",
       },
     ],
     fields: [
@@ -395,9 +401,10 @@ function buildManifest(session, exportData, records, brain) {
         ref: "F0",
         analyzer_ref: "A0",
         name: FIELD_NAME,
-        display_name: "Session context",
+        display_name: "Session activity",
         type: "array",
-        description: "Structured review signals derived from observable session activity.",
+        description: "Structured review signals derived from observable Pi session activity.",
+        review_context: FIELD_REVIEW_CONTEXT,
       },
     ],
     data: [
@@ -411,6 +418,12 @@ function buildManifest(session, exportData, records, brain) {
       },
     ],
   };
+}
+
+function validateFieldDescriptor(fieldName, descriptor) {
+  if (!descriptor?.label || !descriptor.item_singular || !descriptor.item_plural) {
+    throw new Error(`structured review field ${fieldName} requires a complete review_context descriptor`);
+  }
 }
 
 function getBuilderPath() {
@@ -550,7 +563,7 @@ function buildReadCoverageRecord(reads, typescriptSession) {
     title,
     `The session returned ${partial.length} partial file read${partial.length === 1 ? "" : "s"}.`,
     `### Read coverage\n\n${lines.join("\n")}\n\nA read is marked partial when the tool supplied a bounded range or the result contained a truncation marker. A read without that evidence is a full candidate, not proof that the agent understood the entire file.`,
-    ["reads", "memory", "partial-read", ...(typescriptSession ? ["typescript"] : [])],
+    ["reads", "read-coverage", "partial-read", ...(typescriptSession ? ["typescript"] : [])],
   );
 }
 
@@ -588,8 +601,8 @@ function buildReadOrderingRecords(reads, edits) {
       "read-order:partial-before-edit",
       `Partial reads before edit (${partialBeforeEdit.length} files)`,
       `${partialBeforeEdit.length} edited files were only partially read before their first edit.`,
-      `### Partial reads before edit\n\n${partialBeforeEdit.map((file) => `- \`${file}\``).join("\n")}\n\nThis is an observable ordering signal. It does not prove that the agent missed relevant context.`,
-      ["memory", "partial-read", "read-before-edit", "review"],
+      `### Partial reads before edit\n\n${partialBeforeEdit.map((file) => `- \`${file}\``).join("\n")}\n\nThis is an observable ordering signal. It does not prove that the agent missed information required for the edit.`,
+      ["read-coverage", "partial-read", "read-before-edit", "review"],
     ));
   }
   if (withoutRead.length) {
@@ -598,7 +611,7 @@ function buildReadOrderingRecords(reads, edits) {
       `Edited without prior read (${withoutRead.length} ${withoutRead.length === 1 ? "file" : "files"})`,
       `${withoutRead.length} edited files had no preceding read operation in the session.`,
       `### Edited without prior read\n\n${withoutRead.map((file) => `- \`${file}\``).join("\n")}\n\nThis is an observable session signal, not a conclusion about the agent's prior knowledge.`,
-      ["memory", "read-before-edit", "review"],
+      ["read-coverage", "read-before-edit", "review"],
     ));
   }
   return records;
@@ -762,13 +775,15 @@ function capitalize(value) {
 }
 
 function runSelfTest() {
+  validateFieldDescriptor(FIELD_NAME, FIELD_REVIEW_CONTEXT);
+  assert(FIELD_REVIEW_CONTEXT.item_plural === "review signals", "session field descriptor");
   assert(classifyCommand("cd /repo && npm run build") === "build", "build classification");
   assert(classifyCommand("npm run check") === "typecheck", "typecheck classification");
   assert(classifyCommand("npm test") === "test", "test classification");
   assert(readCoverage({ args: { limit: 100 }, resultText: "", status: "success", isError: false }) === "partial", "bounded read classification");
   assert(readCoverage({ args: {}, resultText: "[10 more lines in file]", status: "success", isError: false }) === "partial", "marker read classification");
   assert(displayCommand("cd /repo && npm run build 2>&1 | tail -20") === "npm run build", "command display");
-  process.stdout.write("session-memory self-test passed\n");
+  process.stdout.write("session-activity-review self-test passed\n");
 }
 
 function assert(condition, message) {
