@@ -1,30 +1,38 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const ANALYZER_ID = "session-activity-review";
-const BUILDER_VERSION = "9";
+const BUILDER_VERSION = "12";
 const DEFAULT_BRAIN_NAME = "activity-review";
 const FIELD_NAME = "signals";
 const FIELD_REPORT = "report";
 const FIELD_HANDOFF = "handoff";
 const FIELD_REVIEW_CONTEXT = {
   label: "Review signals",
+  blurb: "Observable signals extracted from this Pi session.",
   item_singular: "review signal",
   item_plural: "review signals",
 };
 const FIELD_REPORT_CONTEXT = {
   label: "Session report",
+  blurb: "A compact view of the observable activity in this Pi session.",
   item_singular: "session report",
   item_plural: "session reports",
 };
 const FIELD_HANDOFF_CONTEXT = {
   label: "Pattern review handoff",
+  blurb: "A bounded Markdown package for asking another AI to review session patterns.",
   item_singular: "pattern review handoff",
   item_plural: "pattern review handoffs",
+};
+const SESSION_REVIEW_CONTEXT = {
+  label: "Activity review",
+  blurb: "Observable signals from this Pi session.",
 };
 const HANDOFF_MAX_CHARS = 40_000;
 const SESSION_FILE_PATH = "__gsc_session__";
@@ -32,6 +40,180 @@ const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 const STALE_LOCK_AGE_MS = 10 * 60 * 1000;
 
 function main() {
+  try {
+    const args = process.argv.slice(2);
+    if (args.includes("--help") || args.includes("-h")) {
+      printProtocolHelp();
+      return;
+    }
+    if (args.includes("--self-test")) {
+      runSelfTest();
+      return;
+    }
+    if (args.length > 0) {
+      throw new Error("normal analyzer execution reads one JSON request from stdin; use --help or --self-test");
+    }
+
+    const request = readAnalyzerRequest();
+    const cacheKey = analyzerCacheKey(request);
+    const cachePaths = analyzerCachePaths(cacheKey);
+    const releaseLock = acquireLock(cachePaths.lockPath);
+    try {
+      const cached = readJSON(cachePaths.responsePath);
+      if (cached && cached.status && cached.session_id === request.session.session_id) {
+        process.stdout.write(`${JSON.stringify({ ...cached, status: "cached" })}\n`);
+        return;
+      }
+
+      const exportData = runRequestedExport(request);
+      const analysis = buildSessionAnalysis(exportData);
+      const response = buildAnalyzerResponse(request, analysis);
+      writeState(cachePaths.responsePath, response);
+      process.stdout.write(`${JSON.stringify(response)}\n`);
+    } finally {
+      releaseLock();
+    }
+  } catch (error) {
+    process.stderr.write(`[${ANALYZER_ID}] ${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
+function printProtocolHelp() {
+  process.stdout.write("Read one Session Analyzer Protocol JSON request from stdin and return Markdown tabs.\n\n");
+  process.stdout.write("Normal usage:\n");
+  process.stdout.write("  gsc pi sessions analyzers run --analyzer activity-review < request.json\n\n");
+  process.stdout.write("The request supplies a normalized session descriptor and a gsc export command.\n");
+  process.stdout.write("Use --self-test to run deterministic parser checks.\n");
+}
+
+function readAnalyzerRequest() {
+  const input = fs.readFileSync(0, "utf8");
+  let request;
+  try {
+    request = JSON.parse(input);
+  } catch (error) {
+    throw new Error(`invalid analyzer request JSON: ${error.message}`);
+  }
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("analyzer request must be a JSON object");
+  }
+  if (request.protocol_version !== "1.0") {
+    throw new Error(`unsupported analyzer protocol version ${JSON.stringify(request.protocol_version)}`);
+  }
+  if (!request.session || typeof request.session.session_id !== "string" || !request.session.session_id) {
+    throw new Error("analyzer request session.session_id is required");
+  }
+  if (!request.export || typeof request.export.executable !== "string" || !request.export.executable) {
+    throw new Error("analyzer request export.executable is required");
+  }
+  if (!Array.isArray(request.export.args) || request.export.args.some((value) => typeof value !== "string")) {
+    throw new Error("analyzer request export.args must be an array of strings");
+  }
+  if (request.requested_tabs != null && (!Array.isArray(request.requested_tabs) || request.requested_tabs.some((value) => typeof value !== "string"))) {
+    throw new Error("analyzer request requested_tabs must be an array of strings");
+  }
+  return request;
+}
+
+function analyzerCacheKey(request) {
+  const identity = {
+    builder: ANALYZER_ID,
+    builder_version: BUILDER_VERSION,
+    session: request.session,
+    range: request.range || {},
+    export: request.export,
+    requested_tabs: request.requested_tabs || [],
+  };
+  return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+}
+
+function analyzerCachePaths(cacheKey) {
+  const gscHome = process.env.GSC_HOME;
+  const root = gscHome
+    ? path.join(gscHome, "data", "pi", "session-analyzers", "cache", ANALYZER_ID)
+    : path.join(os.tmpdir(), "gsc-session-analyzers", ANALYZER_ID);
+  return {
+    responsePath: path.join(root, `${cacheKey}.json`),
+    lockPath: path.join(root, `${cacheKey}.lock`),
+  };
+}
+
+function runRequestedExport(request) {
+  const result = spawnSync(
+    request.export.executable,
+    request.export.args,
+    { encoding: "utf8", maxBuffer: 128 * 1024 * 1024, shell: false },
+  );
+  if (result.error) {
+    throw new Error(`could not run gsc export: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`gsc export failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`}`);
+  }
+  let data;
+  try {
+    data = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(`gsc export returned invalid JSON: ${error.message}`);
+  }
+  if (data.status !== "success") {
+    throw new Error(data.message || `gsc export returned status ${data.status || "unknown"}`);
+  }
+  return data;
+}
+
+function buildAnalyzerResponse(request, analysis) {
+  const response = {
+    protocol_version: "1.0",
+    status: "success",
+    analyzer: { id: ANALYZER_ID, version: BUILDER_VERSION },
+    session_id: request.session.session_id,
+    range: { ...(request.range || {}), revision: request.session.revision || request.range?.revision || "" },
+    presentation: {
+      label: SESSION_REVIEW_CONTEXT.label,
+      blurb: SESSION_REVIEW_CONTEXT.blurb,
+    },
+    tabs: [
+      {
+        id: "report",
+        label: "Overview",
+        default: true,
+        markdown: analysis.report.long_markdown,
+        copy_label: "Copy overview",
+      },
+      {
+        id: "signals",
+        label: "Activity",
+        markdown: buildSignalsMarkdown(analysis.records),
+        copy_label: "Copy activity",
+      },
+      {
+        id: "handoff",
+        label: "Handoff",
+        markdown: analysis.handoff.markdown,
+        copy_label: "Copy handoff",
+      },
+    ],
+  };
+  if (request.requested_tabs?.length) {
+    const requested = new Set(request.requested_tabs);
+    response.tabs = response.tabs.filter((tab) => requested.has(tab.id));
+    if (!response.tabs.length) throw new Error("requested tabs did not match this analyzer");
+    response.tabs.forEach((tab, index) => { tab.default = index === 0; });
+  }
+  return response;
+}
+
+function buildSignalsMarkdown(records) {
+  const lines = ["# Activity", "", `${records.length} observable signal${records.length === 1 ? "" : "s"}.`, ""];
+  for (const record of records) {
+    lines.push(`## ${record.title}`, "", record.long_markdown || record.short_markdown || "", "");
+  }
+  return lines.join("\n").trim() + "\n";
+}
+
+function legacyMain() {
   try {
     const flags = parseFlags(process.argv.slice(2));
     if (flags.help) {
@@ -388,6 +570,7 @@ function buildManifest(session, exportData, records, report, handoff, brain) {
       description: "Deterministic review signals extracted from observable Pi session activity.",
       tags: ["pi", "session", "activity", "review", "deterministic"],
       scope: "session",
+      review_context: SESSION_REVIEW_CONTEXT,
       builder: getBuilderPath(),
     },
     repositories: [
@@ -420,6 +603,11 @@ function buildManifest(session, exportData, records, report, handoff, brain) {
         type: "array",
         description: "Structured review signals derived from observable Pi session activity.",
         review_context: FIELD_REVIEW_CONTEXT,
+        presentation: {
+          kind: "signals",
+          format: "structured",
+          tab_label: "Activity",
+        },
       },
       {
         ref: "F1",
@@ -432,6 +620,7 @@ function buildManifest(session, exportData, records, report, handoff, brain) {
         presentation: {
           kind: "report",
           format: "markdown",
+          tab_label: "Overview",
           default: true,
           drilldown_field: FIELD_NAME,
         },
@@ -447,6 +636,7 @@ function buildManifest(session, exportData, records, report, handoff, brain) {
         presentation: {
           kind: "handoff",
           format: "markdown",
+          tab_label: "Handoff",
           copyable: true,
           copy_label: "Copy handoff",
         },
@@ -466,7 +656,7 @@ function buildManifest(session, exportData, records, report, handoff, brain) {
 }
 
 function validateFieldDescriptor(fieldName, descriptor) {
-  if (!descriptor?.label || !descriptor.item_singular || !descriptor.item_plural) {
+  if (!descriptor?.label || !descriptor.blurb || !descriptor.item_singular || !descriptor.item_plural) {
     throw new Error(`structured review field ${fieldName} requires a complete review_context descriptor`);
   }
 }
@@ -488,8 +678,10 @@ function buildSessionAnalysis(exportData) {
   const fileEdits = [...edits, ...writes];
   const commands = tools.filter((tool) => tool.name === "bash");
   const typescriptSession = isTypeScriptSession(tools);
+  const gitRenames = parseGitRenames(commands);
   const records = [];
 
+  records.push(...buildGitRenameRecords(gitRenames));
   const commandRecords = buildCommandRecords(commands, typescriptSession);
   records.push(...commandRecords);
 
@@ -509,8 +701,8 @@ function buildSessionAnalysis(exportData) {
   if (timingRecord) records.push(timingRecord);
 
   const sortedRecords = records.sort((left, right) => left.key.localeCompare(right.key));
-  const reportMarkdown = buildSessionReport({ events, tools, reads, edits, writes, commands });
-  const handoffMarkdown = buildSessionHandoff({ events, tools, reads, edits, writes, commands, records: sortedRecords });
+  const reportMarkdown = buildSessionReport({ events, tools, reads, edits, writes, commands, gitRenames });
+  const handoffMarkdown = buildSessionHandoff({ events, tools, reads, edits, writes, commands, gitRenames, records: sortedRecords });
   return {
     records: sortedRecords,
     report: buildReportItem(reportMarkdown),
@@ -541,7 +733,7 @@ function buildHandoffItem(markdown) {
   };
 }
 
-function buildSessionReport({ events, tools, reads, edits, writes, commands }) {
+function buildSessionReport({ events, tools, reads, edits, writes, commands, gitRenames = [] }) {
   const conversation = getConversationMessages(events);
   const users = conversation.filter((event) => event.role === "user");
   const assistants = conversation.filter((event) => event.role === "assistant");
@@ -585,6 +777,13 @@ function buildSessionReport({ events, tools, reads, edits, writes, commands }) {
     }
   }
 
+  if (gitRenames.length) {
+    report.push("", "## Git changes", "", `- Renames: ${gitRenames.length}`);
+    for (const rename of gitRenames) {
+      report.push(`- ${rename.sources.join(", ")} → ${rename.destination}`);
+    }
+  }
+
   if (errors.length) {
     report.push(
       "",
@@ -597,7 +796,7 @@ function buildSessionReport({ events, tools, reads, edits, writes, commands }) {
   return `${report.join("\n").trim()}\n`;
 }
 
-function buildSessionHandoff({ events, tools, reads, edits, writes, commands, records }) {
+function buildSessionHandoff({ events, tools, reads, edits, writes, commands, gitRenames = [], records }) {
   const conversation = getConversationMessages(events);
   const users = conversation.filter((event) => event.role === "user");
   const fileActivity = [...reads, ...edits, ...writes];
@@ -607,7 +806,7 @@ function buildSessionHandoff({ events, tools, reads, edits, writes, commands, re
   const successfulVerification = verification.filter((command) => !command.isError && command.status === "success");
   const repeatedCommands = summarizeRepeatedCommands(commands);
   const repeatedFailures = repeatedCommands.filter((group) => group.items.length >= 3 && group.items.every((item) => item.isError || item.status !== "success"));
-  const phases = inferSessionPhases({ reads, fileActivity, commands, errors });
+  const phases = inferSessionPhases({ reads, fileActivity, commands, errors, gitRenames });
   const turnDurations = getTurnDurations(events);
   const report = [
     "# Pattern review handoff",
@@ -628,6 +827,7 @@ function buildSessionHandoff({ events, tools, reads, edits, writes, commands, re
     "",
     `- Phase sequence: ${phases.join(" → ")}`,
     `- File activity: ${reads.length} reads · ${edits.length} edits · ${writes.length} writes`,
+    `- Git changes: ${gitRenames.length} rename${gitRenames.length === 1 ? "" : "s"}`,
     `- Verification commands: ${verification.length} observed · ${successfulVerification.length} reported success`,
     `- Tool result errors: ${errors.length}`,
     "",
@@ -643,6 +843,7 @@ function buildSessionHandoff({ events, tools, reads, edits, writes, commands, re
     report.push("- No recognized build, typecheck, test, or lint command was observed.");
   }
   if (fileActivity.length) report.push(`- File activity continued across ${files.length} unique file${files.length === 1 ? "" : "s"}.`);
+  if (gitRenames.length) report.push(`- Git rename activity affected ${unique(gitRenames.flatMap((rename) => [...rename.sources, rename.destination])).length} path${unique(gitRenames.flatMap((rename) => [...rename.sources, rename.destination])).length === 1 ? "" : "s"}.`);
   if (repeatedCommands.length) report.push(`- ${repeatedCommands.length} command pattern${repeatedCommands.length === 1 ? " was" : "s were"} repeated at least twice.`);
   if (!repeatedCommands.length) report.push("- No command pattern was repeated more than once.");
 
@@ -675,10 +876,10 @@ function buildSessionHandoff({ events, tools, reads, edits, writes, commands, re
   return limitHandoff(`${report.join("\n").trim()}\n`);
 }
 
-function inferSessionPhases({ reads, fileActivity, commands, errors }) {
+function inferSessionPhases({ reads, fileActivity, commands, errors, gitRenames = [] }) {
   const phases = [];
   if (reads.length) phases.push("explore");
-  if (fileActivity.some((tool) => tool.name === "edit" || tool.name === "write")) phases.push("implement");
+  if (fileActivity.some((tool) => tool.name === "edit" || tool.name === "write") || gitRenames.length) phases.push("implement");
   if (errors.length) phases.push("recover");
   if (commands.some((command) => ["build", "typecheck", "test", "lint"].includes(classifyCommand(command.args.command || "")))) phases.push("verify");
   return unique(phases.length ? phases : ["observe"]);
@@ -879,6 +1080,239 @@ function buildCommandRecords(commands, typescriptSession) {
   });
 }
 
+function buildGitRenameRecords(renames) {
+  const grouped = new Map();
+  for (const rename of renames) {
+    const identity = `${rename.sources.join("\x00")}\x00${rename.destination}`;
+    const group = grouped.get(identity) || {
+      sources: rename.sources,
+      destination: rename.destination,
+      commands: [],
+      followUps: [],
+      statuses: [],
+    };
+    group.commands.push(rename.command);
+    group.followUps.push(...rename.followUps);
+    group.statuses.push(rename.status);
+    grouped.set(identity, group);
+  }
+
+  return [...grouped.values()].map((rename) => {
+    const count = rename.commands.length;
+    const sourceText = rename.sources.map((source) => inlineCode(source)).join(", ");
+    const destinationText = inlineCode(rename.destination);
+    const followUpCount = rename.followUps.length;
+    const followUpSummary = summarizeFollowUps(rename.followUps);
+    const title = `Git rename: ${rename.sources.join(", ")} → ${rename.destination}${count > 1 ? ` (${count})` : ""}`;
+    const short = `Renamed ${sourceText} to ${destinationText} with git mv${followUpSummary ? `, then ran ${followUpSummary}` : ""}.`;
+    const lines = [
+      "### Git rename",
+      ...rename.sources.map((source) => `- From: ${inlineCode(source)}`),
+      `- To: ${destinationText}`,
+      `- Status: ${unique(rename.statuses).join(", ") || "unknown"}`,
+      ...rename.commands.map((command) => `- Command: ${inlineCode(command)}`),
+    ];
+    if (followUpCount) {
+      lines.push("", "### Follow-up commands");
+      for (const followUp of rename.followUps) {
+        lines.push(`- ${inlineCode(followUp.command)} (${followUp.kind})`);
+      }
+    }
+    return reviewItem(
+      `git:rename:${stableKey(`${rename.sources.join("-")}-${rename.destination}`)}`,
+      title,
+      short,
+      lines.join("\n"),
+      ["git", "rename", "file-activity"],
+      rename.statuses.some((status) => status !== "success") ? ["errors"] : [],
+      "Git changes",
+    );
+  });
+}
+
+function summarizeFollowUps(followUps) {
+  const counts = new Map();
+  for (const followUp of followUps) {
+    counts.set(followUp.kind, (counts.get(followUp.kind) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([kind, count]) => `${count} ${kind}${count === 1 ? "" : "s"}`)
+    .join(" and ");
+}
+
+function parseGitRenames(commands) {
+  const renames = [];
+  for (const command of commands) {
+    const rawCommand = String(command.args.command || "");
+    const segments = splitShellSegments(rawCommand);
+    let cwd = "";
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const tokens = tokenizeShell(segment);
+      if (tokens[0] === "cd" && tokens[1]) {
+        cwd = resolveActivityPath(tokens[1], cwd);
+        continue;
+      }
+      const parsed = parseGitMv(tokens, cwd);
+      if (!parsed) continue;
+      const followUps = segments.slice(index + 1)
+        .map((followUp) => ({
+          command: followUp.trim(),
+          kind: classifyGitFollowUp(followUp),
+        }))
+        .filter((followUp) => followUp.command);
+      renames.push({
+        ...parsed,
+        command: segment.trim(),
+        followUps,
+        status: command.isError || command.status !== "success" ? (command.status || "error") : "success",
+      });
+    }
+  }
+  return renames;
+}
+
+function parseGitMv(tokens, cwd) {
+  if (!tokens.length) return null;
+  let gitIndex = -1;
+  for (let index = 0; index < Math.min(tokens.length, 4); index += 1) {
+    if (tokens[index] === "git") {
+      gitIndex = index;
+      break;
+    }
+  }
+  if (gitIndex < 0) return null;
+
+  let index = gitIndex + 1;
+  let gitCwd = cwd;
+  while (index < tokens.length && tokens[index] !== "mv") {
+    if (tokens[index] === "-C" && tokens[index + 1]) {
+      gitCwd = resolveActivityPath(tokens[index + 1], cwd);
+      index += 2;
+      continue;
+    }
+    if (tokens[index].startsWith("-")) {
+      index += 1;
+      continue;
+    }
+    return null;
+  }
+  if (tokens[index] !== "mv") return null;
+
+  const operands = [];
+  let endOptions = false;
+  for (index += 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!endOptions && token === "--") {
+      endOptions = true;
+      continue;
+    }
+    if (!endOptions && token.startsWith("-")) continue;
+    operands.push(token);
+  }
+  if (operands.length < 2) return null;
+
+  const destination = resolveActivityPath(operands.at(-1), gitCwd);
+  const sources = operands.slice(0, -1).map((source) => resolveActivityPath(source, gitCwd));
+  if (!destination || sources.some((source) => !source)) return null;
+  return { sources, destination };
+}
+
+function classifyGitFollowUp(command) {
+  const value = command.toLowerCase();
+  if (/\b(sed|perl)\b/.test(value)) return "edit";
+  if (/\b(grep|rg|git\s+(diff|status))\b/.test(value)) return "verification";
+  return "follow-up";
+}
+
+function splitShellSegments(command) {
+  const segments = [];
+  let start = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    const isDoubleOperator = (character === "&" && command[index + 1] === "&")
+      || (character === "|" && command[index + 1] === "|");
+    if (character === ";" || character === "|" || isDoubleOperator) {
+      const segment = command.slice(start, index).trim();
+      if (segment) segments.push(segment);
+      if (isDoubleOperator) index += 1;
+      start = index + 1;
+    }
+  }
+  const finalSegment = command.slice(start).trim();
+  if (finalSegment) segments.push(finalSegment);
+  return segments;
+}
+
+function tokenizeShell(command) {
+  const tokens = [];
+  let token = "";
+  let quote = "";
+  let escaped = false;
+  const push = () => {
+    if (token) tokens.push(token);
+    token = "";
+  };
+  for (const character of command) {
+    if (escaped) {
+      token += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = "";
+      else token += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      push();
+    } else {
+      token += character;
+    }
+  }
+  if (escaped) token += "\\";
+  push();
+  return tokens;
+}
+
+function resolveActivityPath(value, cwd) {
+  if (!value) return "";
+  if (path.isAbsolute(value)) return path.normalize(value);
+  return cwd ? path.normalize(path.resolve(cwd, value)) : path.normalize(value);
+}
+
+function stableKey(value) {
+  return String(value).replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 180) || "rename";
+}
+
+function inlineCode(value) {
+  return `\`${String(value).replaceAll("`", "'")}\``;
+}
+
 function buildReadCoverageRecord(reads, typescriptSession) {
   if (reads.length === 0) return null;
   const partial = reads.filter((read) => readCoverage(read) === "partial");
@@ -1029,9 +1463,9 @@ function getTurnDurations(events) {
   });
 }
 
-function reviewItem(key, title, shortMarkdown, longMarkdown, topics = [], keywords = []) {
+function reviewItem(key, title, shortMarkdown, longMarkdown, topics = [], keywords = [], group = "Session activity") {
   return {
-    group: "Session activity",
+    group,
     key: `${ANALYZER_ID}:${key}`,
     title,
     topics: unique(topics),
@@ -1135,6 +1569,17 @@ function runSelfTest() {
   assert(readCoverage({ args: { limit: 100 }, resultText: "", status: "success", isError: false }) === "partial", "bounded read classification");
   assert(readCoverage({ args: {}, resultText: "[10 more lines in file]", status: "success", isError: false }) === "partial", "marker read classification");
   assert(displayCommand("cd /repo && npm run build 2>&1 | tail -20") === "npm run build", "command display");
+  const renameCommand = {
+    args: { command: "cd /repo/components && git mv OtherSessionsView.js AllSessionsView.js && sed -i '' 's/pi-other-sessions/pi-all-sessions/g' AllSessionsView.js && grep -n 'pi-other-sessions' AllSessionsView.js" },
+    status: "success",
+    isError: false,
+  };
+  const renames = parseGitRenames([renameCommand]);
+  assert(renames.length === 1, "git mv detection");
+  assert(renames[0].sources[0] === "/repo/components/OtherSessionsView.js", "git mv source path");
+  assert(renames[0].destination === "/repo/components/AllSessionsView.js", "git mv destination path");
+  assert(renames[0].followUps.length === 2 && renames[0].followUps[0].kind === "edit" && renames[0].followUps[1].kind === "verification", "git mv follow-up classification");
+  assert(buildGitRenameRecords(renames)[0].group === "Git changes", "git rename review group");
   process.stdout.write("session-activity-review self-test passed\n");
 }
 

@@ -1,298 +1,204 @@
-# Pi Session Activity Review Analyzer
+# Session Activity Review Analyzer
 
-`session-activity-review` extracts deterministic review signals from observable
-activity in a Pi session log. It is designed to answer two questions:
+`session-activity-review` is a deterministic, agent-neutral Session Analyzer.
+It turns a normalized GitSense session export into a few authored Markdown
+tabs that help a reviewer decide what to inspect next.
 
-* What did the agent do?
-* What observable activity should be verified before reviewing the code?
+It is designed to answer:
 
-The Brain exposes three views of the same session. `report` is a compact
-Markdown overview for the default view. `signals` is the structured detail
-view for filtering and drilling into commands, reads, verification, and other
-session activity. `handoff` is a builder-defined Markdown package that can be
-copied to another AI for a pattern review.
+* What observable activity took place?
+* Is there a useful pattern to review before spending time on the code?
+* What bounded evidence could be handed to another AI for a pattern review?
 
-The builder does not make an LLM call and does not claim that an agent missed
-an instruction or retained particular knowledge. It reports bounded reads,
-command families, verification order, errors, and elapsed turns.
+It does not decide whether the code is correct and it does not claim that an
+agent saw or followed a repository instruction.
 
-## Build the session Brain
+## Session Analyzer contract
 
-Register the builder once so Chat can discover it for sessions from any
-repository:
+Normal execution reads one JSON request from stdin and writes one JSON response
+to stdout. Diagnostics go to stderr. The builder never reads a native Pi log
+directly. `gsc` supplies a normalized session descriptor and an executable
+export command in the request.
 
-```bash
-gsc pi sessions brains register \
-  --brain activity-review \
-  --builder "$HOME/pi/.gitsense/bin/build-session-activity-review"
-```
-
-This is a one-time analyzer registration, not a per-session bootstrap.
-
-To remove the registration later without deleting existing session Brains:
+Run the builder through the registered analyzer command:
 
 ```bash
-gsc pi sessions brains unregister --brain activity-review
+gsc pi sessions analyzers run \
+  --analyzer activity-review < request.json
 ```
 
-List registered session Brain builders with:
+The builder invokes the request's `export.executable` with `export.args`
+directly, without a shell. This lets the same analyzer work with any agent
+adapter that produces the GitSense normalized session format.
+
+The response owns its tabs. The current analyzer returns:
+
+| Tab | Purpose |
+| --- | --- |
+| Overview | Compact counts and observed elapsed activity. |
+| Activity | Detailed deterministic signals and evidence. |
+| Handoff | A bounded Markdown package for asking another AI to review session patterns. |
+
+The analyzer can return `status: "cached"`, but cached responses contain the
+complete presentation and all tabs. A cache hit is not an `unchanged` response
+with missing content.
+
+## Register the analyzer
+
+Register the executable once on the machine where GitSense Chat runs:
 
 ```bash
-gsc pi sessions brains list
+gsc pi sessions analyzers register \
+  --analyzer activity-review \
+  --builder "$HOME/pi/.gitsense/bin/build-session-activity-review" \
+  --description "Observable Pi session activity and review signals"
 ```
 
-Run the builder manually when developing or troubleshooting the analyzer. The
-initial `--import` creates the session Brain and records its builder descriptor;
-after that, the backend can discover and refresh the builder automatically.
-
-Run this from the Pi repository:
+Inspect registration:
 
 ```bash
-.gitsense/bin/build-session-activity-review \
-  --session <pi-session-uuid> \
-  --import
+gsc pi sessions analyzers list
+gsc pi sessions analyzers show --analyzer activity-review --format json
 ```
 
-The builder can be called on every refresh. It asks `gsc` for the cheap current
-session revision, uses a per-session lock, and skips the export/import when the
-revision and builder version have not changed:
+Remove the registration without changing analyzer output already cached by a
+caller:
 
 ```bash
-.gitsense/bin/build-session-activity-review \
-  --session <pi-session-uuid> \
-  --import
+gsc pi sessions analyzers unregister --analyzer activity-review
 ```
 
-To pass a revision already obtained by `gsc`, use:
+Registration is stored under `$GSC_HOME/data/pi/session-analyzers`. The
+analyzer itself caches complete responses under the same Pi data directory.
+The cache identity includes the builder version, session descriptor, revision,
+review boundary, export command, and requested tabs. The builder takes a
+per-cache lock so concurrent refreshes do not run the same export twice.
 
-```bash
-REVISION="$(gsc pi sessions revision --uuid <pi-session-uuid> | jq -r .revision)"
-.gitsense/bin/build-session-activity-review \
-  --session <pi-session-uuid> \
-  --revision "$REVISION" \
-  --import
-```
+## Request shape
 
-An unchanged invocation returns `status: unchanged`. The processed revision is
-stored beside the session Brain under `$GSC_HOME/data/pi/session-brains/.state`.
-
-The builder exports the complete active session branch with:
-
-```text
---head-events 0 --tail-events 0 --capsule-mode compaction-aware
-```
-
-It then fully replaces:
-
-```text
-$GSC_HOME/data/pi/session-brains/activity-review-<pi-session-uuid>.db
-```
-
-The import is atomic, so rerunning the builder keeps the Brain current as the
-session grows. Use `--output /tmp/session-activity-review.json` without
-`--import` to inspect the generated manifest first.
-
-`gsc pi sessions revision` is a fast check based on the synchronized session
-file metadata and counters; it does not walk or export the session message
-tree.
-
-## Configure the export
-
-Request the session-level field with:
-
-```bash
-gsc pi sessions export \
-  --format gsc-json \
-  --uuid <pi-session-uuid> \
-  --include-metadata-index \
-  --session-metadata 'session::activity-review::report' \
-  --session-metadata 'session::activity-review::signals' \
-  --session-metadata 'session::activity-review::handoff'
-```
-
-Session metadata appears as one `Session` occurrence in the metadata index. It
-is intentionally not copied onto every file operation. The canonical selector
-is `session::<brain>::<field>`; for example:
-
-```bash
-gsc pi sessions export \
-  --format gsc-json \
-  --uuid <pi-session-uuid> \
-  --include-metadata-index \
-  --session-metadata 'session::activity-review::report' \
-  --session-metadata 'session::activity-review::signals' \
-  --session-metadata 'session::activity-review::handoff'
-```
-
-The logical Brain name (`activity-review`) is combined with the session UUID by `gsc`:
-
-```text
-$GSC_HOME/data/pi/session-brains/activity-review-<pi-session-uuid>.db
-```
-
-## Session report
-
-The `report` field contains one session-level report item. Its Markdown is
-intentionally factual and compact so a reviewer can orient themselves before
-opening the structured details. It includes conversation counts, tool-call and
-file counts, command categories, and observed elapsed activity such as:
-
-```markdown
-# Session activity
-
-4 conversation messages · 2 turns · 155 tool calls · 36 files referenced
-
-## Observed elapsed activity
-
-- Reads: 6m observed across 33 reads
-- Edits and writes: 4m observed across 12 file changes
-- Bash commands: 11m observed across 46 commands
-
-Observed elapsed time includes model processing and pauses between events. It
-is not tool execution time.
-```
-
-The report does not declare that a session is ready for review. It gives the
-reviewer enough context to decide whether to inspect the detailed signals or
-go directly to the changed code.
-
-The report field is defined as:
+The request has `protocol_version: "1.0"` and includes a normalized session
+descriptor, an optional review range, and the export command:
 
 ```json
 {
-  "name": "report",
-  "display_name": "Session activity report",
-  "type": "array",
-  "review_context": {
-    "label": "Session report",
-    "item_singular": "session report",
-    "item_plural": "session reports"
+  "protocol_version": "1.0",
+  "session": {
+    "session_id": "019f...",
+    "revision": "v1:current...",
+    "name": "Implement a feature",
+    "cwd": "/Users/terrchen/pi",
+    "repo_root": "/Users/terrchen/pi",
+    "provider": "provider-name",
+    "model": "model-name",
+    "message_count": 305,
+    "tool_call_count": 155,
+    "file_ref_count": 36,
+    "source": {
+      "kind": "pi",
+      "session_file": "/path/to/session.jsonl",
+      "session_file_exists": true
+    }
+  },
+  "range": {
+    "revision": "v1:current...",
+    "since_revision": "v1:reviewed...",
+    "reviewed_from_entry_id": "optional-boundary"
+  },
+  "export": {
+    "executable": "gsc",
+    "args": [
+      "pi", "sessions", "export", "--format", "gsc-json",
+      "--uuid", "019f...", "--head-events", "0", "--tail-events", "0",
+      "--capsule-mode", "compaction-aware"
+    ]
+  }
+}
+```
+
+`since_revision` is a cache identity. The builder may use
+`reviewed_from_entry_id` to scope its analysis, but a revision string alone is
+not assumed to be a historical event boundary. The export command must carry
+any actual range flags needed by a builder.
+
+## Response shape
+
+```json
+{
+  "protocol_version": "1.0",
+  "status": "success",
+  "analyzer": {
+    "id": "session-activity-review",
+    "version": "12"
+  },
+  "session_id": "019f...",
+  "range": {
+    "revision": "v1:current...",
+    "since_revision": "v1:reviewed..."
   },
   "presentation": {
-    "kind": "report",
-    "format": "markdown",
-    "default": true,
-    "drilldown_field": "signals"
-  }
-}
-```
-
-## Pattern review handoff
-
-The `handoff` field is one structured item whose `markdown` value is owned by
-the builder. The builder decides which evidence and reference material to
-include. This analyzer includes the task, session scale, phase sequence,
-progress signals, anomalies, repeated command patterns, tool statuses, and
-short output excerpts for commands that failed or were repeated.
-
-The builder keeps the handoff bounded to approximately 10,000 tokens. Routine
-successful commands are summarized, while suspicious commands retain their
-arguments and useful output excerpts. The handoff asks another AI to review
-observable session patterns, not to determine whether the code is correct.
-
-The field is defined as:
-
-```json
-{
-  "name": "handoff",
-  "display_name": "Pattern review handoff",
-  "type": "array",
-  "review_context": {
-    "label": "Pattern review handoff",
-    "item_singular": "pattern review handoff",
-    "item_plural": "pattern review handoffs"
+    "label": "Activity review",
+    "blurb": "Observable signals from this Pi session."
   },
-  "presentation": {
-    "kind": "handoff",
-    "format": "markdown",
-    "copyable": true,
-    "copy_label": "Copy handoff"
-  }
+  "tabs": [
+    {
+      "id": "report",
+      "label": "Overview",
+      "default": true,
+      "markdown": "# Session activity\n\n...",
+      "copy_label": "Copy overview"
+    },
+    {
+      "id": "signals",
+      "label": "Activity",
+      "markdown": "# Activity\n\n...",
+      "copy_label": "Copy activity"
+    },
+    {
+      "id": "handoff",
+      "label": "Handoff",
+      "markdown": "# Pattern review handoff\n\n...",
+      "copy_label": "Copy handoff"
+    }
+  ]
 }
 ```
 
-The item uses one canonical content property. It does not use
-`short_markdown` or `long_markdown`:
+The UI should use the returned presentation and tab labels rather than
+assuming that every analyzer has `report`, `signals`, or `handoff` fields.
 
-```json
-{
-  "group": "Session handoff",
-  "key": "session-activity-review:handoff",
-  "title": "Pattern review handoff",
-  "markdown": "# Pattern review handoff\n..."
-}
-```
+## Deterministic signals
 
-## Review signals
+The Activity tab currently extracts:
 
-Items use the session metadata contract:
-
-```json
-{
-  "group": "Session activity",
-  "key": "session-activity-review:commands:build",
-  "title": "Build: npm run build, tsc -b (2)",
-  "topics": ["build", "commands", "verification", "typescript"],
-  "short_markdown": "The agent ran two TypeScript build commands.",
-  "long_markdown": "### Build commands\n\n- `npm run build` — 1 occurrence\n- `tsc -b` — 1 occurrence",
-  "markdown": "..."
-}
-```
-
-The `signals` field is a structured review field, so its manifest definition
-also includes a required descriptor:
-
-```json
-{
-  "name": "signals",
-  "display_name": "Session activity",
-  "type": "array",
-  "review_context": {
-    "label": "Review signals",
-    "item_singular": "review signal",
-    "item_plural": "review signals"
-  }
-}
-```
-
-The builder validates this descriptor before writing the manifest. Consumers
-can use it to render counts such as `7 review signals matched` without
-guessing what the field contains.
-
-The title is the compact signal shown in the metadata list. Topics provide
-stable filters. `short_markdown` is used for compact rendering, while
-`long_markdown` contains the command, file, timestamp, and evidence details.
-
-The manifest records the Brain scope and builder path. The registration above
-stores the same builder contract globally under `$GSC_HOME/data/pi`, so
-`gsc pi sessions brains show --session <uuid> --brain activity-review --format json`
-can discover it before the first session import. A session-specific descriptor
-created by `--import` takes precedence. The environment variable below remains
-a compatibility fallback for older backends.
-
-The builder currently emits report data and signal items for:
-
-* build, typecheck, test, lint, and runtime commands;
-* partial read coverage;
-* edited files with only partial reads before the first edit;
-* edited files with no preceding read;
+* conversation messages using user and assistant messages, excluding tool
+  calls and tool results from the conversation count;
+* reads, edits, writes, and Bash commands;
+* partial read coverage and edited files without a preceding read;
+* build, typecheck, test, lint, and runtime command families;
+* Git rename activity, including chained `git mv`, edit, and verification
+  commands;
 * verification after the final edit;
 * tool-result errors; and
 * average and longest observed elapsed turn time.
 
-For TypeScript sessions, recognized command items receive the `typescript`
-topic so they can be filtered separately from other session activity.
+Observed elapsed time includes model processing and pauses between events. It
+is not tool execution time. These are review signals, not correctness claims.
 
-## Chat app refresh hook
+The Activity Markdown keeps the full explanation and evidence. For example, a
+command signal can include the command, its occurrence count, status, and
+bounded output details. The Handoff tab is deliberately bounded to roughly
+10,000 tokens and is builder-defined. It is intended to be copied when a
+reviewer wants another AI to comment on session patterns after several minutes
+of work.
 
-To have older Pi Chat backends refresh session metadata before each initial
-load and poll, configure the builder path in its environment:
+## Development and self-test
+
+Run syntax checks and deterministic parser tests from this repository:
 
 ```bash
-export GSC_PI_SESSION_METADATA_BUILDER="$HOME/pi/.gitsense/bin/build-session-activity-review"
+node --check .gitsense/bin/build-session-activity-review
+.gitsense/bin/build-session-activity-review --self-test
 ```
 
-When session metadata is configured, the backend asks `gsc pi sessions
-revision` for the cheap current revision, then invokes the builder once for
-each requested Brain. The builder lock and revision state make unchanged polls
-cheap while still rebuilding after the session log changes.
+Normal execution no longer accepts `--session`, `--brain`, `--revision`, or
+`--import`. Those values are part of the stdin request and response contract.
